@@ -1,0 +1,16 @@
+# local working state of each project; project.json and NOTES.md stay tracked
+projects/*/repo/
+projects/*/build/
+projects/*/state.json
+projects/*/state.tmp
+projects/*/watch.lock
+projects/*/batches/
+projects/*/conflicts/
+style/.evidence.lock
+__pycache__/
+.DS_Store
+projects/*/folder.git/
+projects/*/folder.index
+projects/*/folder-cache.json
+projects/*/folder.lock
+profile.json
