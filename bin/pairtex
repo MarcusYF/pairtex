@@ -44,7 +44,7 @@ import io
 import time
 from pathlib import Path
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 APP = Path(__file__).resolve().parent.parent
 TEMPLATES = APP / "templates"
 DEFAULT_HOME = Path.home() / ".pairtex"
@@ -1771,7 +1771,12 @@ def cmd_init(args) -> int:
                           capture_output=True, text=True)
     if proc.returncode != 0:
         shutil.rmtree(d, ignore_errors=True)
-        raise OwError("clone failed: " + mask_url(proc.stderr.strip()), EXIT_REMOTE)
+        hint = ""
+        if re.search(r"username|password|authenticat|denied|40[13]", proc.stderr, re.I):
+            hint = (f"\nThe paper needs your git credentials. Store them once, from your own terminal: git ls-remote {mask_url(url)}"
+                    + ("\n(username: git; password: a git authentication token from Overleaf, Account settings, Git integration)."
+                       if backend == "overleaf" else "") + "\nThen run init again. pairtex never asks for or stores them.")
+        raise OwError("clone failed: " + mask_url(proc.stderr.strip()) + hint, EXIT_REMOTE)
     repo = d / "repo"
     branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
     if backend == "overleaf" and not owner:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.3 (2026-11-09)
+
+Any agent, and an install the agent can do for you.
+- **Claude Code and Codex from one install.** `install.sh` also links the skill at `~/.agents/skills/pairtex`, where Codex
+  (and other agents that read the open agent-skills format) find it. The skill names the CLI by `pairtex` on the PATH and says
+  how to watch in an agent that cannot be woken by a background command.
+- **`AGENTS.md` lets an agent install PairTeX for the user**: check the tools, clone, install, ask the user's name and where the
+  paper lives, add it, and check it, while the user stores their Overleaf token themselves. It also says which agents and plans
+  work: PairTeX has no model or API key of its own.
+- A clone that fails for want of credentials says how to store them once, from the user's own terminal.
+- `install.sh` checks for Python 3.9 or newer and git, and runs unattended.
+
 ## 0.4.2 (2026-11-09)
 
 Fixes from the first days of use on a shared paper.

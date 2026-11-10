@@ -10,9 +10,12 @@ wakes the session; the session fixes the text, replies next to the comment, publ
 watcher again.
 
 ```
-PT=~/.claude/skills/pairtex/../bin/pairtex       # the CLI (`ow` is its old name); `$PT <command> -h` for options
-$PT paths                                          # where the profile, style vault and projects are
+pairtex paths       # the CLI, on PATH via ~/.local/bin after install.sh; where the profile, style vault and projects are
 ```
+
+Below, `$PT` stands for the CLI: `pairtex`, or `~/.local/bin/pairtex` when it is not on PATH, or `bin/pairtex` next to this
+skill's folder (`ow` is its old name). `$PT <command> -h` lists the options. The skill works in any agent that reads
+`SKILL.md` files (Claude Code, Codex, ...); where a step depends on the agent, it says so.
 
 | Path (`pairtex paths`) | What it is |
 | --- | --- |
@@ -63,8 +66,10 @@ own edits and closed threads are style evidence.
    guidelines that bind edits.
 2. **Read** `STYLE.md`, `preferences.md`, the project's `NOTES.md`, and once per session the `base_style` files in `project.json`.
 3. **Finish leftovers.** If status says "to finish first", run `$PT show <slug>` and handle those comments (step 2 below) first.
-4. **Start the watcher** with the Bash tool and `run_in_background: true`: `$PT watch <slug>`. It holds a lock, so only one session
-   watches a project on this machine. Use `--takeover` only when the author moves the loop to this session.
+4. **Start the watcher** in the background, so that its exit wakes you: `$PT watch <slug>` (in Claude Code, the Bash tool with
+   `run_in_background: true`). An agent that cannot be woken by a background command runs `$PT watch <slug> --max-hours 0.5` in
+   the foreground, or polls `$PT watch <slug> --once` every 30 to 60 seconds (`AGENTS.md` in the repository). It holds a lock, so
+   only one session watches a project on this machine. Use `--takeover` only when the author moves the loop to this session.
 5. **Tell the author** in two lines: which project and file you are watching, and how to comment (`%! … ..` to change, `%? … ..`
    to ask, `[[ ]]` around the words meant; `..` sends it). For a folder: save the file to send a comment, and let the editor reload
    files changed on disk (VS Code does; Emacs needs `global-auto-revert-mode`).
@@ -114,7 +119,7 @@ publish or inspect them. Exit 5: another session holds the project.
    commit the vault if the data home is a git repository. An event that is not the author's writing (another session's push, a
    comment read as an edit): `$PT learn <slug> --discard <ids> --why "<reason>"`, and say if it points to a bug in `pairtex`.
    Both `--ack` and `--discard` work while the watcher runs.
-5. **Restart** `$PT watch <slug>` in the background.
+5. **Restart** the watcher the way you started it (step 4 of "Start the loop").
 6. **Report** to the author in chat in two to four lines, in the language `preferences.md` asks for (else the author's): the
    comments, what changed, any rule learned, anything that needs them.
 
