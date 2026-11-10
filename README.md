@@ -1,34 +1,93 @@
-# PairTeX
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/banner-dark.svg">
+    <img src="docs/figures/banner.svg" width="100%" alt="PairTeX: pair-write your LaTeX paper with an AI coauthor, without leaving your editor.">
+  </picture>
+</p>
 
-**Pair-write your LaTeX paper with an AI coauthor, in Overleaf or your own editor.**
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-27709C" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/version-0.4.2-C6952C" alt="version 0.4.2">
+  <img src="https://img.shields.io/badge/python-3.9%2B-6D5398" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/works%20with-Overleaf%20%C2%B7%20git%20%C2%B7%20any%20editor-227828" alt="works with Overleaf, git and any editor">
+</p>
 
-Write a LaTeX paper with a coding agent as a live coauthor, without leaving your editor. You type a comment into the source,
-`%! make this tighter..`; about a minute later the agent has edited the text (or, for a question, only answered), put its reply in
-a green note next to your comment, and published both back to the same paper. No copying text into a chat and back.
+You type a comment into the LaTeX source, right where the text is (`%! make this tighter..`). About a minute later the agent has
+edited the text, put its reply in a green note next to your comment, and published both back to the same paper. Every edit you
+keep, rewrite or undo teaches it your style, so its first drafts need fewer comments over time.
 
-Along the way it keeps a guide to your writing style, learned from the edits you keep, the ones you rewrite and the ones you undo,
-so its first drafts need fewer comments over time.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/loop-dark.svg">
+    <img src="docs/figures/loop.svg" width="100%" alt="The loop: you comment in your editor; your agent with pairtex picks up the comment, reads the text and your style, edits the .tex and replies; the edit and a green note land in the paper; what you keep, rewrite or undo feeds your style guide, which the agent reads before every edit.">
+  </picture>
+</p>
 
-It works with a paper in **Overleaf** (through Overleaf's git integration), in **any git remote** (GitHub, GitLab), or in a
-**local folder** you edit with VS Code, TeXstudio, Emacs or any other editor. The agent is Claude Code by default; any agent
-that runs shell commands can drive it ([AGENTS.md](AGENTS.md)).
+## Why not just a chatbot?
 
-```mermaid
-flowchart LR
-    A["You type %! … .. or %? … .. in the source"] --> B["pairtex watch (the agent, in the background) picks it up"]
-    B --> C["The agent edits the .tex and replies"]
-    C --> D["pairtex push: compile check, then publish"]
-    D --> E["You see the edit and a green note in the PDF"]
-    E --> F["Delete the note to accept, or follow up under it"]
-    F --> G["pairtex learns from what you kept or changed → your STYLE.md"]
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/versus-dark.svg">
+    <img src="docs/figures/versus.svg" width="100%" alt="With a chatbot you copy text out and paste it back every round, breaking your train of thought, and it forgets your corrections. With PairTeX comments live in the .tex file, the agent works in the background, and it learns a style guide from your edits.">
+  </picture>
+</p>
+
+## Comment where you write
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/comments-dark.svg">
+    <img src="docs/figures/comments.svg" width="100%" alt="%? asks a question that the agent answers in a note without changing text; double brackets point at words, even across lines; %! asks for a change that the agent makes and replies to; two dots send the comment. Then, in the same file: delete the note to accept, comment under it to push back, %! revert this.. to undo, %! 2.. to choose an option.">
+  </picture>
+</p>
+
+Anything a coauthor could do from a margin note works: *draft this section from the bullets above*, *read this as a
+reviewer: what is missing?*, *turn my Chinese note into a paragraph*. For a change, the agent applies it to every parallel
+place (abstract, introduction, conclusion) and says where.
+
+## A style guide that learns you
+
+A chat window forgets your corrections. PairTeX keeps what it learns about your writing, with the evidence, in a file you own.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/style-dark.svg">
+    <img src="docs/figures/style.svg" width="100%" alt="Five kinds of evidence (you rewrite the agent's text, undo an edit, state a preference, write on your own, keep an edit) go into an evidence log with word diffs, and are distilled into STYLE.md: base rules, confirmed rules, tentative patterns, words to prefer or avoid, and what you undid. The agent reads it before every edit.">
+  </picture>
+</p>
+
+A pattern starts as tentative and is confirmed after three independent pieces of evidence, or at once when you say "always"
+or "never". Your edits to `STYLE.md` win, and style never changes a claim. One guide serves all your papers, in every editor
+and with any agent; coauthors each keep their own, learned only from their own edits.
+
+## Built for real papers, with real coauthors
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/features-dark.svg">
+    <img src="docs/figures/features.svg" width="100%" alt="Works where you write: Overleaf, any git remote, a local folder, any agent. Several authors, several loops: each loop answers and learns only from its owner. Safe by default: a compile check before every publish, no deletions unasked, your typing wins, every change a commit. Ready for submission: pairtex check and pairtex clean.">
+  </picture>
+</p>
+
+## Start in three steps
+
+```sh
+git clone https://github.com/MarcusYF/pairtex && cd pairtex && ./install.sh   # 1. install
+pairtex setup --name "Ada Lovelace"                                          #    and say who you are
+pairtex init mypaper --overleaf 6a1b2c3d4e5f --main main.tex                  # 2. add a paper
 ```
+
+3. In Claude Code, in any folder, say **"watch mypaper"**. That session becomes the paper's coauthor: it reads your style
+   guide, starts the watcher in the background and answers each comment as it arrives. Other agents: [AGENTS.md](AGENTS.md).
+
+The rest of this page is the reference: every option, the comment rules in full, and what goes where.
 
 ## Install
 
 Needs Python 3.9+, git, and for the compile check latexmk (TeX Live or MacTeX). macOS and Linux; on Windows, use WSL.
 
 ```sh
-git clone <this repository> pairtex && cd pairtex
+git clone https://github.com/MarcusYF/pairtex && cd pairtex
 ./install.sh                        # links the Claude Code skill and ~/.local/bin/pairtex
 pairtex setup --name "Ada Lovelace"      # your name exactly as Overleaf (or your git commits) shows it to coauthors
 ```
@@ -209,6 +268,7 @@ commit, the loop takes them as the edits of the person that commit names.
 | `templates/` | Starting points for a new style guide, loop preferences and paper notes |
 | `tests/test_e2e.py` | End-to-end test against local stand-ins for Overleaf, a git remote and a folder: `python3 tests/test_e2e.py` |
 | `ROADMAP.md`, `CHANGELOG.md` | What comes next, what changed |
+| `docs/figures/` | The figures on this page and `make_figures.py`, which draws them (light and dark) |
 | `LICENSE` | MIT |
 | `~/.pairtex/` | Your data: `profile.json`, `vault/` (STYLE.md, evidence.jsonl, preferences.md), `projects/<slug>/` |
 

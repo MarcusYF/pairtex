@@ -40,8 +40,8 @@ The gate for giving the tool to coauthors. Nothing here changes how the loop beh
 the tool to one person, one machine and one backend.
 
 **Status (0.4.0, 2026-11-08).** Items 1 to 7 are in, with tests (`CHANGELOG.md`), and the first installation's data has moved
-to its data home. Decided on 2026-11-08: the name PairTeX and the MIT license (0.4.1). Still open: publishing from a new
-repository with fresh history (open decision 2).
+to its data home. Decided on 2026-11-08: the name PairTeX and the MIT license (0.4.1). Published on 2026-11-09 (0.4.2) from a
+new repository with fresh history: https://github.com/MarcusYF/pairtex.
 
 ### 1. A user profile instead of one name
 
@@ -224,7 +224,8 @@ Useful, but not needed for the first public version:
 ## Open decisions
 
 1. **License.** MIT (decided 2026-11-08).
-2. **The public repository.** Named PairTeX (decided 2026-11-08); its home is open. It is published with fresh history.
+2. **The public repository.** Named PairTeX (decided 2026-11-08); public at https://github.com/MarcusYF/pairtex since
+   2026-11-09 (0.4.2), published from a copy with fresh history.
 3. **Notes for new users.** Visible green notes (the current default) or `%` lines.
 4. **Which comments a loop handles.** Its owner's only (recommended), or everyone's when a project has a single loop.
 5. **Install.** `git clone` and `install.sh`, or a `pipx` package.

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" width="960" height="380" role="img" aria-label="Comment syntax: %? asks a question, %! asks for a change, double brackets point at words, two dots send the comment; then accept, push back, undo or choose in the same file">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#E6EDF3} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#9198A1"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#D4A33A"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#B39DDB"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5AA8DA"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5DBB63"/></marker></defs>
+<rect x="0" y="0" width="520" height="246" rx="8" fill="#161B22" stroke="#3D444D" stroke-width="1.6"/><path d="M0,8 a8,8 0 0 1 8,-8 h504 a8,8 0 0 1 8,8 v22 h-520 Z" fill="#21262D"/><circle cx="17" cy="15" r="4.5" fill="#484F58"/><circle cx="32" cy="15" r="4.5" fill="#484F58"/><circle cx="47" cy="15" r="4.5" fill="#484F58"/><text x="66" y="20" font-size="14" class="m" style="fill:#9198A1">main.tex</text>
+<rect x="126.3" y="73" width="267.9" height="23" rx="3" fill="#0F2536"/>
+<rect x="204.9" y="125" width="128.2" height="23" rx="3" fill="#0F2536"/>
+<rect x="39.0" y="151" width="163.1" height="23" rx="3" fill="#0F2536"/>
+<rect x="39.0" y="177" width="311.6" height="49" rx="3" fill="#0F2536"/>
+<text x="14" y="64" font-size="13" class="m" style="fill:#9198A1">1</text>
+<text x="42" y="64" font-size="14.5" class="m">The policy converges when the gain</text>
+<text x="14" y="90" font-size="13" class="m" style="fill:#9198A1">2</text>
+<text x="42" y="90" font-size="14.5" class="m">is small. <tspan class="b">%?</tspan> proved, or only observed?<tspan class="b">..</tspan></text>
+<text x="14" y="116" font-size="13" class="m" style="fill:#9198A1">3</text>
+<text x="14" y="142" font-size="13" class="m" style="fill:#9198A1">4</text>
+<text x="42" y="142" font-size="14.5" class="m">We study the loop. <tspan class="b">[[</tspan>One round is</text>
+<text x="14" y="168" font-size="13" class="m" style="fill:#9198A1">5</text>
+<text x="42" y="168" font-size="14.5" class="m">one mirror step.<tspan class="b">]]</tspan> The target moves.</text>
+<text x="14" y="194" font-size="13" class="m" style="fill:#9198A1">6</text>
+<text x="42" y="194" font-size="14.5" class="m" style="fill:#5AA8DA"><tspan class="b">%!</tspan> too much jargon; define the</text>
+<text x="14" y="220" font-size="13" class="m" style="fill:#9198A1">7</text>
+<text x="42" y="220" font-size="14.5" class="m" style="fill:#5AA8DA">%  target first, under five lines<tspan class="b">..</tspan></text>
+<path d="M522,88 L566,88" stroke="#5AA8DA" stroke-width="1.6" fill="none"/><circle cx="566" cy="88" r="3" fill="#5AA8DA"/>
+<text x="578" y="85" font-size="16"><tspan class="m b" style="fill:#5AA8DA">%? … ..</tspan>  <tspan class="b">A question</tspan></text>
+<text x="578" y="106" font-size="14.5" style="fill:#9198A1">The agent answers in a note, changes no text</text>
+<path d="M522,150.0 L566,150.0" stroke="#5AA8DA" stroke-width="1.6" fill="none"/><circle cx="566" cy="150.0" r="3" fill="#5AA8DA"/>
+<text x="578" y="147.0" font-size="16"><tspan class="m b" style="fill:#5AA8DA">[[ … ]]</tspan>  <tspan class="b">Point at words</tspan></text>
+<text x="578" y="168.0" font-size="14.5" style="fill:#9198A1">even across lines; the brackets go later</text>
+<path d="M522,208.0 L566,208.0" stroke="#5AA8DA" stroke-width="1.6" fill="none"/><circle cx="566" cy="208.0" r="3" fill="#5AA8DA"/>
+<text x="578" y="205.0" font-size="16"><tspan class="m b" style="fill:#5AA8DA">%! … ..</tspan>  <tspan class="b">A change request</tspan></text>
+<text x="578" y="226.0" font-size="14.5" style="fill:#9198A1">The agent edits the text and replies</text>
+<text x="578" y="262" font-size="16"><tspan class="m b" style="fill:#5AA8DA">..</tspan>  <tspan class="b">sends it.</tspan></text>
+<text x="578" y="283" font-size="14.5" style="fill:#9198A1">Take your time over several lines; … is an ellipsis.</text>
+<text x="0" y="326" font-size="16" class="b">Then, in the same file:</text>
+<rect x="0" y="340" width="218" height="34" rx="17" fill="#161B22" stroke="#30363D" stroke-width="1.2"/>
+<text x="16" y="362" font-size="14.5"><tspan class="b">Accept</tspan>  delete the note</text>
+<rect x="230" y="340" width="238" height="34" rx="17" fill="#161B22" stroke="#30363D" stroke-width="1.2"/>
+<text x="246" y="362" font-size="14.5"><tspan class="b">Push back</tspan>  comment under it</text>
+<rect x="480" y="340" width="222" height="34" rx="17" fill="#161B22" stroke="#30363D" stroke-width="1.2"/>
+<text x="496" y="362" font-size="14.5"><tspan class="b">Undo</tspan>  <tspan class="m" style="fill:#5AA8DA">%! revert this..</tspan></text>
+<rect x="714" y="340" width="150" height="34" rx="17" fill="#161B22" stroke="#30363D" stroke-width="1.2"/>
+<text x="730" y="362" font-size="14.5"><tspan class="b">Choose</tspan>  <tspan class="m" style="fill:#5AA8DA">%! 2..</tspan></text>
+</svg>

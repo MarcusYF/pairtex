@@ -15,6 +15,8 @@ Fixes from the first days of use on a shared paper.
 - **`learn --ack` works while the watcher runs.** Acknowledged events are flagged in `evidence.jsonl`, as discarded ones already
   were, and leave every batch at once; the watcher drops them from its queue at its next batch.
 - `pairtex resolve -h` no longer crashes (a bare `%` in a help string).
+- The README opens with figures: the loop, the comment syntax, how the style guide learns, and what makes it safe on a real
+  paper (`docs/figures/`, drawn by `make_figures.py` in light and dark versions).
 
 ## 0.4.1 (2026-11-08)
 
