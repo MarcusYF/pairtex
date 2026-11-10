@@ -91,7 +91,9 @@ We study the loop. [[One round of training is one mirror step.]] The target is t
 - **Part of a paragraph.** Put `[[` and `]]` around the words you mean, even across lines. The brackets show in the PDF while the
   comment waits and the agent removes them when it answers. `【` `】` work too.
 - **Mid-sentence.** `%!` in the middle of a line marks that point; LaTeX hides the rest of that line until the agent answers, and
-  the agent puts the hidden words back.
+  the agent puts the hidden words back. You can also go on writing after the comment's `..` on the same line
+  (`For small $n$ %! is this tight?.., the bound holds.`): those words are your sentence, and they come back after the comment's
+  point.
 - **`..` sends it.** Take as long as you like; a comment can run over several `%!` or `%` lines. Three dots are an ellipsis and do
   not end it (`such as PPO, ..., SFT` is safe).
 - Write it the way you would to a coauthor: "this sentence", "this section", "everywhere" all work. For a change, the agent applies

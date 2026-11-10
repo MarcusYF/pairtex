@@ -100,6 +100,9 @@ publish or inspect them. Exit 5: another session holds the project.
    words of the comment are the line's own prose (now hidden from the PDF). Put those words back in the sentence before the
    marker, and leave the `%! …` text itself unchanged at the end of the line so `resolve` finds it. `resolve` moves an inline
    thread onto its own lines under the source line, and warns if the hidden words are still missing.
+   When the author writes on after the comment's `..` on the same line (`For small $n$ %! is this tight?.., the bound holds.`), the
+   batch says so: the words after `..` are the sentence's prose and `resolve` puts them back after the comment's point. Do not
+   retype them; to change them, edit them where they are, after the `..`.
 3. **Publish.** `$PT push <slug> -m "<what changed>"`. It compiles the affected main file with the project's engine, commits,
    merges with anything typed meanwhile, and publishes. On exit 6, fix the new LaTeX errors it lists; if a note causes one, replace
    that note's line with `%!<id> <comment>` and `%!<id>> <reply>` lines. On exit 7 (a guard), restore what it names, or pass the
@@ -110,6 +113,7 @@ publish or inspect them. Exit 5: another session holds the project.
    preference the comments state. Update STYLE.md (or NOTES.md for paper-specific points), `$PT learn <slug> --ack <ids>`, and
    commit the vault if the data home is a git repository. An event that is not the author's writing (another session's push, a
    comment read as an edit): `$PT learn <slug> --discard <ids> --why "<reason>"`, and say if it points to a bug in `pairtex`.
+   Both `--ack` and `--discard` work while the watcher runs.
 5. **Restart** `$PT watch <slug>` in the background.
 6. **Report** to the author in chat in two to four lines, in the language `preferences.md` asks for (else the author's): the
    comments, what changed, any rule learned, anything that needs them.

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2 (2026-11-09)
+
+Fixes from the first days of use on a shared paper.
+- **A mid-line comment ends at its first `..`.** Words written after it on the same line (`… %! is this tight?.., the bound
+  holds.`) are the sentence's prose: the batch says so, and `resolve` puts them back after the comment's point unless the edit
+  already has them. Before, such a comment never became ready. `...` and `../` still do not end a comment.
+- **Notes quote the words the author bracketed**, as they were in the batch, not as the edit left them, in TeX quotes
+  (``…''), with `~` ties kept. Straight double quotes in a comment or reply become TeX quotes, and a `~` before a command
+  (`Prop.~\ref{…}`) stays a tie.
+- **Evidence keeps its direction.** The author's edit counts as a revision of the agent's text only if that text was in the file
+  when the edit began. Before, an edit made shortly before an agent push from chat (no comment) was matched against the later
+  text and stored backwards, as the author changing the agent's text.
+- **`learn --ack` works while the watcher runs.** Acknowledged events are flagged in `evidence.jsonl`, as discarded ones already
+  were, and leave every batch at once; the watcher drops them from its queue at its next batch.
+- `pairtex resolve -h` no longer crashes (a bare `%` in a help string).
+
 ## 0.4.1 (2026-11-08)
 
 Named PairTeX, under the MIT license. The name leaves out "Overleaf": the tool also works with any git remote or a local folder,

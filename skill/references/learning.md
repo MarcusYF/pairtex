@@ -20,7 +20,9 @@ with an id (E0001, E0002, ...). Kinds, strongest first:
 Only the owner's own edits count as their writing. Overleaf's web edits each carry the editor's name, so a coauthor's edit, a
 push by the loop or by another session or tool (any commit not titled "Update on Overleaf.", or "Update in editor." for a folder),
 ends a window, and comments are undone before comparing. A closed thread whose file someone else also changed since the answer
-was published reads "changed by others": it is not the owner's rewrite. An older event with a `note` saying other people edited
+was published reads "changed by others": it is not the owner's rewrite. The agent's text counts as the "before" side only once
+it is in the file: an owner edit made before a later push (a rewrite approved in chat, say) is the owner's own edit, never a
+revision of that later text. An older event with a `note` saying other people edited
 in the same window may not be the owner's; learn from it only if it is clearly in their voice. If an event still is not the
 author's writing, do not just
 acknowledge it: `pairtex learn <slug> --discard <ids> --why "<reason>"` keeps it out of future analysis with the reason.
@@ -55,7 +57,7 @@ Comments count as evidence when they state a preference beyond the paragraph at 
 
 1. Add a dated line to the **Log** at the end of `STYLE.md` naming the events and what changed ("2026-11-08: E0012, E0014 → T07
    'state the regime before the result'; E0013 → What … undid").
-2. `pairtex learn <slug> --ack <every id you processed, including the ones you skipped>`.
+2. `pairtex learn <slug> --ack <every id you processed, including the ones you skipped>` (it works while the watcher runs).
 3. Commit the vault where it lives (`pairtex paths`; the data home is a git repository unless set up with `--no-git`):
    `git -C <data home> add -A <vault> && git -C <data home> commit -m "style: …"`.
 4. In the chat report, name any new or promoted rule in one line, so the author can object.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -324,8 +325,9 @@ def main():
     agent_edit(lambda t: t.replace("[[a sampler, a judge and a reference]]", "[[a sampler, a judge and a reference policy]]"))
     ow("resolve", "demo", "c9", "Reference became reference policy, the paper's term.")
     text = (REPO / "main.tex").read_text()
-    ok("components: a sampler, a judge and a reference policy.\n%!c9 \"a sampler, a judge and a reference policy\" use "
-       "the paper's names\n%!c9> Reference became" in text, "brackets go, and the inline thread moves under the line")
+    ok("components: a sampler, a judge and a reference policy.\n%!c9 \"a sampler, a judge and a reference\" use "
+       "the paper's names\n%!c9> Reference became" in text,
+       "brackets go, the thread quotes Ada's words as she bracketed them, and moves under the line")
     out = ow("push", "demo", "--no-compile")
     ok("answered c9" in out, "c9 is published")
     out = ow("show", "demo", "c8", "c9")
@@ -353,7 +355,7 @@ def main():
     ok("warning" not in out, "the hidden words and the coauthor note are back")
     text = (REPO / "main.tex").read_text()
     ok("every few rounds and use the analysis to account for it. \\ada{check this}\n%!c10 \"We explain why practitioners "
-       "refresh the reference … every few rounds\" say how often\n%!c10> Said how often" in text,
+       "periodically refresh the reference policy\" say how often\n%!c10> Said how often" in text,
        "one clean line, the thread under it")
     out = ow("push", "demo", "--no-compile")
     ok("answered c10" in out, "c10 is published")
@@ -435,6 +437,7 @@ def main():
        "a deleted note is not read as Ada's own edit")
 
     test_04(remote, owm)
+    test_042()
     print(f"\nall {passed} checks passed")
     shutil.rmtree(TMP, ignore_errors=True)
 
@@ -658,6 +661,73 @@ def test_04(remote, owm):
     ok(prof["name"] == "Ada Lovelace" and prof["id_prefix"] == "c", "the profile keeps the owner's name and the c prefix")
     out = ow_as(nh, "status", "gdemo")
     ok("answers: Ada Lovelace (Ada)" in out and "1 pushed" in out, "the moved project runs unchanged")
+
+
+def test_042():
+    print("0.4.2: help text, a mid-line comment that ends at .., note quotes, evidence order, ack while watching")
+    r = subprocess.run([sys.executable, str(OW), "resolve", "-h"], env=ENV, capture_output=True, text=True)
+    ok(r.returncode == 0 and "% lines" in r.stdout, "resolve -h prints its help")
+    cfg_path = HOME / "projects" / "demo" / "project.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg.update(terminator="..", notes="visible")
+    cfg_path.write_text(json.dumps(cfg))
+    ow("learn", "demo")
+    if state()["pending_events"]:
+        ow("learn", "demo", "--ack", *state()["pending_events"])
+
+    ada_edit(lambda t: t.replace("\\end{document}", "\\section{Bounds}\n[[For small samples in Section~2]] %! is this "
+                                 "tight?.., the bound holds.\nThe next sentence stays.\n\n\\end{document}"))
+    out = ow("watch", "demo", "--interval", "0.2", timeout=30)
+    m = re.search(r"## (c\d+) · ", out)
+    cid = m.group(1) if m else "?"
+    ok(m and "wrote on after the comment's `..`" in out
+       and "For small samples in Section~2, the bound holds." in out,
+       "a mid-line comment ends at its first .., and the words after it are the sentence's prose")
+    agent_edit(lambda t: t.replace("[[For small samples in Section~2]]",
+                                   "[[For small samples in Section~2, below the critical size]]"))
+    ow("resolve", "demo", cid, 'Yes, below it; added "below the critical size".')
+    text = (REPO / "main.tex").read_text()
+    ok("\nFor small samples in Section~2, below the critical size, the bound holds.\n" in text,
+       "resolve puts the words after the .. back into the sentence")
+    ok(f"\\claude{{{cid}}}{{\\emph{{``For small samples in Section~2''}} is this tight?}}" in text,
+       "the note quotes the bracketed words as the batch had them, in TeX quotes, with the tie kept")
+    ok("added ``below the critical size''." in text, "straight quotes in a reply become TeX quotes")
+    out = ow("push", "demo", "-m", "bounds", timeout=180) if shutil.which("latexmk") else ow("push", "demo", "--no-compile")
+    ok("published" in out and ("compiles" in out or not shutil.which("latexmk")), "the note compiles and is published")
+
+    p0 = "The sampler draws more pairs from recent rounds than from early ones, which reverses the weighting under a fixed reference."
+    p1 = ("The sampler draws more pairs from recent rounds than from early ones, and this reverses the usual weighting seen under "
+          "a fixed reference.")
+    p2 = ("The sampler draws more pairs from recent rounds than from early ones; this reverses the usual weighting seen under "
+          "a fixed reference.")
+    p3 = ("The sampler draws more pairs from recent rounds than from early ones; this reverses the usual weighting found with "
+          "a fixed reference.")
+    ada_edit(lambda t: t.replace("\\end{document}", "\\section{Order}\n" + p0 + "\n\n\\end{document}"))
+    ow("learn", "demo")
+    ow("learn", "demo", "--ack", *state()["pending_events"])
+    ada_edit(lambda t: t.replace(p0, p1))
+    ow("watch", "demo", "--once", expect=1)  # the checkout takes Ada's edit; nothing reads it as evidence yet
+    agent_edit(lambda t: t.replace(p1, p2))  # a rewrite Ada approved in chat, published without a comment
+    ow("push", "demo", "--no-compile", "-m", "semicolon, approved in chat")
+    out = ow("learn", "demo")
+    ok("changed the agent's text" not in out and "Ada's edit:" in out and "{+and this+}" in out,
+       "an edit made before the agent's later push stays Ada's own edit, in the right direction")
+    ow("learn", "demo", "--ack", *state()["pending_events"])
+    ada_edit(lambda t: t.replace(p2, p3))
+    out = ow("learn", "demo")
+    ok("Ada changed the agent's text" in out and "[-seen under-]{+found with+}" in out,
+       "an edit of the agent's published text is still read as a revision")
+
+    ids = list(state()["pending_events"])
+    lock = HOME / "projects" / "demo" / "watch.lock"
+    lock.write_text(json.dumps({"pid": os.getpid(), "started": "now"}))
+    out = ow("learn", "demo", "--ack", *ids)
+    ok(f"acknowledged {len(ids)} event(s)" in out and "next batch" in out, "learn --ack works while the watcher runs")
+    ok(state()["pending_events"] == ids, "and leaves state.json to the watcher")
+    out = ow("learn", "demo", "--no-sync")
+    ok("no writing-style evidence waiting" in out, "acknowledged events leave the queue at once")
+    lock.unlink()
+    ok("style evidence waiting: 0" in ow("status", "demo"), "status no longer counts them")
 
 
 if __name__ == "__main__":

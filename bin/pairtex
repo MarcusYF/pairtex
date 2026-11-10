@@ -44,7 +44,7 @@ import io
 import time
 from pathlib import Path
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 APP = Path(__file__).resolve().parent.parent
 TEMPLATES = APP / "templates"
 DEFAULT_HOME = Path.home() / ".pairtex"
@@ -442,6 +442,19 @@ def kind_of(mark: str) -> str:
 
 
 TERM_RE = re.compile(r"(?<!\.)\.\.\s*$")  # ".." ends a comment; "..." (an ellipsis) does not
+# In a comment typed mid-line, the first ".." (not "...", not "../") ends it even when the author writes on after it: the words
+# after it are prose that LaTeX hides until `pairtex resolve` puts them back.
+MID_TERM = re.compile(r"(?<!\.)\.\.(?=[\s,;:!?)\]}]|$)")
+
+
+def join_prose(code: str, tail: str) -> str:
+    """The code part of a line with prose words appended (no space before punctuation)."""
+    code, tail = code.rstrip(), tail.strip()
+    if not tail:
+        return code
+    if not code:
+        return tail
+    return code + ("" if tail[0] in ",.;:!?)]}'" else " ") + tail
 NOTE_RE = re.compile(r"\\claude\s*(?:\[[^\]\n]*\]\s*)?\{([a-z]{1,8}\d+)\}")
 NOTE_HANDLE = re.compile(r"\\claude\s*\[([^\]\n]*)\]")
 # The macro's definition: 4 arguments since 0.4 (an optional handle, then id, comment, reply); 3 before.
@@ -555,9 +568,10 @@ def wrap_math(text: str, keep: tuple = ()) -> str:
     return "".join(out)
 
 
-def tex_text(text: str, keep: tuple = ()) -> str:
+def tex_text(text: str, keep: tuple = (), source: bool = False) -> str:
     """Make free text safe as a LaTeX macro argument: keep $math$ and \\commands{...}, wrap bare maths in $...$,
-    escape the special characters elsewhere, and neutralise unbalanced $ or braces."""
+    escape the special characters elsewhere, turn "straight quotes" into ``TeX quotes'', and neutralise unbalanced $ or
+    braces. A ~ before a command (Prop.~\\ref) is a tie; with source=True (words quoted from the paper's source) every ~ is."""
     text = wrap_math("".join(UNICODE_TEX.get(ch, ch) for ch in text), keep)
     dollars = len(re.findall(r"(?<!\\)\$", text))
     opens = len(re.findall(r"(?<!\\)\{", text))
@@ -598,7 +612,9 @@ def tex_text(text: str, keep: tuple = ()) -> str:
         elif ch == "^":
             out.append("\\^{}")
         elif ch == "~":
-            out.append("\\~{}")
+            out.append("~" if source or text[i + 1:i + 2] == "\\" else "\\~{}")
+        elif ch == '"':
+            out.append("``" if i == 0 or text[i - 1].isspace() or text[i - 1] in "([{`" else "''")
         elif ch in "<>|":
             out.append({"<": "\\textless{}", ">": "\\textgreater{}", "|": "\\textbar{}"}[ch])
         else:
@@ -800,7 +816,13 @@ def scan_file(path: str, text: str, terminator: str | None = None) -> tuple[list
             i += 1
             continue
         parts, j = [mk["text"]], i + 1
-        ready = not terminator or bool(TERM_RE.search(mk["text"]))
+        tail = ""
+        if terminator and not mk["full"]:
+            mt = MID_TERM.search(mk["text"])
+            if mt and mk["text"][mt.end():].strip():
+                tail = mk["text"][mt.end():].strip()
+                parts = [mk["text"][:mt.end()]]
+        ready = not terminator or bool(TERM_RE.search(parts[0]))
         while j < len(lines) and not (terminator and ready):
             m2 = parse_marker(lines[j])
             if m2 and m2["kind"] == "open" and m2["full"]:
@@ -832,7 +854,7 @@ def scan_file(path: str, text: str, terminator: str | None = None) -> tuple[list
                     cand = note_ids(lines[i - 1])[-1]
                     follow = cand if own_id(cand) else None
             opens.append({"file": path, "start": i, "end": j, "text": body, "inline": not mk["full"], "occ": k,
-                          "col": mk["col"], "mark": mk["mark"], "follow_up": follow, "ready": ready})
+                          "col": mk["col"], "mark": mk["mark"], "follow_up": follow, "ready": ready, "tail": tail})
         i = j
     # Each comment takes the bracketed parts of its paragraph that close before it and no earlier comment took.
     claimed: set = set()
@@ -1067,7 +1089,7 @@ def read_events(ids: list[str]) -> list[dict]:
         for line in f:
             if line.strip():
                 e = json.loads(line)
-                if e.get("id") in want and not e.get("discarded"):
+                if e.get("id") in want and not e.get("discarded") and not e.get("acked"):
                     found[e["id"]] = e
     return [found[i] for i in ids if i in found]
 
@@ -1219,14 +1241,21 @@ def run_edit_events(p: Project, st: dict, a_rev: str, b_rev: str, excluded: set,
             continue
         old_text, new_text = file_at(p.repo, a_rev, f) or "", file_at(p.repo, b_rev, f) or ""
         lines = new_text.split("\n")
+        # The author can only have changed the agent's text if it was in the file when the run began. Text the agent
+        # published later (a push from chat while these edits waited to be read) is never the "before" side.
+        before_paras = {sha1(x) for x in prose_paragraphs(old_text, p.macros)}
+        present = {h: info for h, info in ours_paras.items()
+                   if all(sha1(x) in before_paras for x in info["text"].split("\n\n") if x.strip())}
         for old, new in para_changes(old_text, without_new_comments(new_text, old_text), p.macros):
             if new and sha1(new) in excluded:
                 continue
             if old and new and old.split() == new.split():
                 continue
             match_cid, match_text, score = None, None, 0.0
-            if new:
-                for h, info in ours_paras.items():
+            if new and old and sha1(old) in present:  # the run started from the agent's paragraph itself
+                match_cid, match_text, score = present[sha1(old)].get("cid"), old, 1.0
+            elif new:
+                for h, info in present.items():
                     s = similarity(info["text"], new)
                     if s > score:
                         match_cid, match_text, score = info.get("cid"), info["text"], s
@@ -1511,7 +1540,11 @@ def comment_record(p: Project, c: dict, cid: str, author: str | None = None) -> 
                                                                     for r in c.get("ranges", [])],
            "inline": c["inline"], "occ": c["occ"], "follow_up": c.get("follow_up"), "section": breadcrumb(lines, c["start"]),
            "anchor": anc["where"], "anchor_lines": [a + 1, b], "sent_at": now_iso()}
-    if c["inline"]:
+    if c["inline"] and c.get("tail"):  # the author wrote on after the comment's "..": those words are prose
+        first = lines[c["start"]]
+        rec["midline"] = {"before_line": join_prose(strip_brackets(first[:comment_index(first)]), c["tail"]),
+                          "displaced": c["tail"], "comment": c["text"], "tail": True}
+    elif c["inline"]:
         try:
             mid = midline(p, c["file"], lines[c["start"]], c["text"])
         except GitError:
@@ -1548,7 +1581,14 @@ def render_comment(p: Project, st: dict, rec: dict) -> str:
         out.append("")
     a, b = rec["anchor_lines"]
     mid = rec.get("midline")
-    if mid:
+    if mid and mid.get("tail"):
+        out.append(f"{who} typed `%{rec.get('mark', '@')}` in the middle of line {rec['line']} and wrote on after the comment's "
+                   f"`..`: \"{mid['displaced']}\" is the sentence's own prose, which LaTeX hides until the comment is "
+                   f"answered. `pairtex resolve` puts it back right after the comment's point, so the line will read:")
+        out += ["```tex", mid["before_line"], "```",
+                "Do not retype those words. To change them, edit them where they are, after the `..`; if your edit already "
+                "puts them in the paragraph, delete them there.", ""]
+    elif mid:
         out.append(f"{who} typed `%{rec.get('mark', '@')}` in the middle of line {rec['line']}: it marks a point in the "
                    f"sentence, and LaTeX now drops the rest of that line from the PDF. Before the comment the line read:")
         out += ["```tex", mid["before_line"], "```"]
@@ -1653,6 +1693,7 @@ def emit_batch(p: Project, st: dict, fresh: list[dict], reason: str) -> str:
     events = own_edit_events(p, st)
     append_events(p, st, events)
     pending = read_events(st.get("pending_events", []))
+    st["pending_events"] = [e["id"] for e in pending]  # events acknowledged or discarded while the watcher ran leave the queue
     n = len(fresh)
     title = f"{n} comment{'s' if n != 1 else ''}" if n else "writing-style evidence to learn from"
     out = [f"# PairTeX · {p.slug} · {title} · {now_iso()}", "",
@@ -1871,7 +1912,8 @@ def cmd_watch(args) -> int:
             save_state(p, st)
             sys.stdout.write(text)
             return EXIT_BATCH
-        if args.learn_every and len(st.get("pending_events", [])) >= args.learn_every and t - last_change > 60:
+        if (args.learn_every and len(st.get("pending_events", [])) >= args.learn_every and t - last_change > 60
+                and len(read_events(st["pending_events"])) >= args.learn_every):
             text = emit_batch(p, st, [], f"{len(st['pending_events'])} style events waiting")
             save_state(p, st)
             sys.stdout.write(text)
@@ -1959,16 +2001,17 @@ def cmd_resolve(args) -> int:
     # 2. Remove the comment's [[ ]] from the prose, then rewrite its lines into a thread with the reply under it.
     path = p.repo / rec["file"]
     lines = path.read_text(encoding="utf-8").split("\n")
-    quotes = []
+    # The note quotes the bracketed words as the author marked them in the batch, not as the edit left them.
+    quotes = [short_quote(r["text"]) for r in rec["ranges"] if r.get("text", "").strip()] if "ranges" in rec else \
+        [short_quote(r["text"]) for r in c.get("ranges", []) if r["text"].strip()]
     if c.get("ranges"):
         toks = []
         for r in c["ranges"]:
             toks += [tuple(r["open"]), tuple(r["close"])]
-            quotes.append(short_quote(r["text"]))
         for ln, col, n in sorted(toks, reverse=True):
             lines[ln] = lines[ln][:col] + lines[ln][col + n:]
         path.write_text("\n".join(lines), encoding="utf-8")
-        c = next((o for o in scan_file(rec["file"], "\n".join(lines))[0] if o["text"] == rec["text"]
+        c = next((o for o in scan_file(rec["file"], "\n".join(lines), p.terminator)[0] if o["text"] == rec["text"]
                   and o["start"] == c["start"]), None) or find_open(p, rec)
         if c is None:
             raise OwError(f"lost {cid} after removing its brackets; inspect {rec['file']}")
@@ -1978,11 +2021,19 @@ def cmd_resolve(args) -> int:
     indent = re.match(r"\s*", first).group(0)
     comment_text = c["text"]
     warn = ""
+    tail = c.get("tail", "") if c["inline"] else ""
     if c["inline"]:
         # An inline comment's thread moves under its source line, so the commenter accepts by deleting whole lines. A mid-line
         # comment's hidden words should be back in the prose by now.
         disp = (rec.get("midline") or {}).get("displaced")
-        if disp:
+        if tail or (rec.get("midline") or {}).get("tail"):
+            # The words the author wrote after the comment's "..": put them back after the comment's point, unless the
+            # edit already has them in the paragraph.
+            a, b = paragraph_span(lines, c["start"])
+            prose = " ".join(" ".join(prose_paragraphs("\n".join(lines[a:b]), p.macros)).split())
+            if tail and " ".join(" ".join(prose_paragraphs(tail, p.macros)).split()) in prose:
+                tail = ""
+        elif disp:
             a, b = paragraph_span(lines, c["start"])
             prose = " ".join(" ".join(prose_paragraphs("\n".join(lines[a:b]), p.macros)).split())
             want = " ".join(" ".join(prose_paragraphs(disp, p.macros)).split())
@@ -2007,9 +2058,10 @@ def cmd_resolve(args) -> int:
         else:  # e.g. Chinese under pdfLaTeX: kept verbatim in a % line above the note, which LaTeX never reads
             pre = [f"{indent}%{mark}{cid} {said}"]
             said_tex = "\\emph{(the line above)}"
+        shown_quotes = [q.replace("…", "...") for q in quotes if renderable(q, cjk) and q.count("$") % 2 == 0]
         about_tex = ""
-        if about and renderable(about, cjk) and about.count("$") % 2 == 0:
-            about_tex = "\\emph{" + tex_text(about.replace("…", "..."), tuple(p.macros)) + "} "
+        if shown_quotes:
+            about_tex = "\\emph{" + " ".join(f"``{tex_text(q, tuple(p.macros), source=True)}''" for q in shown_quotes) + "} "
         handle = rec.get("handle") or p.handle
         name = "" if not ds or handle == ds["default"] else f"[{handle}]"
         new_lines = pre + [f"{indent}\\claude{name}{{{cid}}}{{{about_tex}{said_tex}}}{{{tex_text(flat_reply, tuple(p.macros))}}}"]
@@ -2019,7 +2071,7 @@ def cmd_resolve(args) -> int:
                      for n, t in enumerate(texts)]
         new_lines += [f"{indent}%{mark}{cid}> {r}".rstrip() for r in reply_lines]
     if c["inline"]:
-        lines[c["start"]:c["end"]] = [first[:k].rstrip()] + new_lines
+        lines[c["start"]:c["end"]] = [join_prose(first[:k], tail)] + new_lines
     else:
         lines[c["start"]:c["end"]] = new_lines
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -2367,42 +2419,48 @@ def conflict(p: Project, st: dict, remote: str, resolved: list[str]) -> int:
     return EXIT_CONFLICT
 
 
+def mark_events(ids: set, key: str, value: dict) -> int:
+    """Flag events in evidence.jsonl, under its lock: "discarded" (not the author's writing) or "acked" (learned). Flagged
+    events leave every batch at once; a running watcher drops them from its queue at its next batch."""
+    flagged = 0
+    with open(STYLE_DIR / ".evidence.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows = EVIDENCE.read_text(encoding="utf-8").splitlines() if EVIDENCE.exists() else []
+        out = []
+        for line in rows:
+            if line.strip():
+                e = json.loads(line)
+                if e.get("id") in ids:
+                    e[key] = value
+                    flagged += 1
+                line = json.dumps(e, ensure_ascii=False)
+            out.append(line)
+        tmp = EVIDENCE.with_suffix(".tmp")
+        tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        os.replace(tmp, EVIDENCE)
+    return flagged
+
+
 def cmd_learn(args) -> int:
     p = Project(args.slug)
-    if args.discard:
-        ids = {x.strip() for a in args.discard for x in a.split(",") if x.strip()}
-        if not args.why.strip():
-            raise OwError("say why with --why: discarded evidence keeps the reason")
-        flagged = 0
-        with open(STYLE_DIR / ".evidence.lock", "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            rows = EVIDENCE.read_text(encoding="utf-8").splitlines() if EVIDENCE.exists() else []
-            out = []
-            for line in rows:
-                if line.strip():
-                    e = json.loads(line)
-                    if e.get("id") in ids:
-                        e["discarded"] = {"why": args.why.strip(), "date": now_iso()}
-                        flagged += 1
-                    line = json.dumps(e, ensure_ascii=False)
-                out.append(line)
-            tmp = EVIDENCE.with_suffix(".tmp")
-            tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
-            os.replace(tmp, EVIDENCE)
-        print(f"discarded {flagged} event(s)")
-        if lock_owner(p):  # discarded events are hidden from batches already; the queue is tidied on the next ack
+    if args.discard or args.ack:
+        if args.discard:
+            ids = {x.strip() for a in args.discard for x in a.split(",") if x.strip()}
+            if not args.why.strip():
+                raise OwError("say why with --why: discarded evidence keeps the reason")
+            done = f"discarded {mark_events(ids, 'discarded', {'why': args.why.strip(), 'date': now_iso()})} event(s)"
+        else:
+            ids = {x.strip() for a in args.ack for x in a.split(",") if x.strip()}
+            done = f"acknowledged {mark_events(ids, 'acked', {'date': now_iso()})} event(s)"
+        if lock_owner(p):  # the watcher owns state.json; it drops these from its queue at its next batch
+            print(done + "; the watcher drops them from its queue at its next batch")
             return 0
-        args.ack = list(ids)
-    if args.ack and lock_owner(p):
-        raise OwError(f"the watcher for {p.slug} is running and owns state.json; acknowledge after it exits", EXIT_LOCKED)
-    st = load_state(p)
-    if args.ack:
-        ids = [x.strip() for a in args.ack for x in a.split(",") if x.strip()]
-        before = len(st["pending_events"])
-        st["pending_events"] = [e for e in st["pending_events"] if e not in set(ids)]
+        st = load_state(p)
+        st["pending_events"] = [e for e in st.get("pending_events", []) if e not in ids]
         save_state(p, st)
-        print(f"acknowledged {before - len(st['pending_events'])} event(s); {len(st['pending_events'])} still pending")
+        print(done + f"; {len(read_events(st['pending_events']))} still pending")
         return 0
+    st = load_state(p)
     if not args.no_sync and not lock_owner(p):
         try:
             remote = remote_head(p)
@@ -2507,7 +2565,7 @@ def cmd_status(args) -> int:
     todo = [cid for cid, c in st["comments"].items() if c["status"] in ("sent", "resolved")]
     if todo:
         print(f"  to finish first: {', '.join(todo)} (`pairtex show {p.slug}`)")
-    print(f"  style evidence waiting: {len(st.get('pending_events', []))}")
+    print(f"  style evidence waiting: {len(read_events(st.get('pending_events', [])))}")
     print(f"  style guide: {style_summary()}")
     return 0
 
@@ -2960,7 +3018,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("reply", nargs="?")
     s.add_argument("--reply-file")
     s.add_argument("--allow-edit", action="store_true", help="a question whose answer the author asked to apply")
-    s.add_argument("--plain", action="store_true", help="keep the thread in % lines even where a note could go")
+    s.add_argument("--plain", action="store_true", help="keep the thread in %% lines even where a note could go")
     s.set_defaults(fn=cmd_resolve)
 
     s = sub.add_parser("push", help="compile-check, commit and publish the checkout to the paper")
