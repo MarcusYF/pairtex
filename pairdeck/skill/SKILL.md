@@ -111,7 +111,8 @@ The watcher prints one batch and exits 0. Exit 4: the deck changed after you ans
   order.
 
 **Replies** are one to three short sentences: what changed and where (slide numbers), and one alternative only if it is worth
-the author's time. The author presses **Keep** on an answer they accept as made (that is `kept` evidence), or **Follow up**.
+the author's time. The author presses **Keep** on an answer they accept as made (that is `kept` evidence; the comment's box then
+leaves the slide), or **Follow up**.
 
 ## Accuracy
 

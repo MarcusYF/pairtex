@@ -317,6 +317,9 @@
     if (!isOpen || marking) return;
     var h = here();
     comments.forEach(function (c) {
+      // A comment the author accepted (Keep) is settled: its box leaves the slide, and comes back only while
+      // the author has that comment selected in the list.
+      if (c.status === "kept" && c.id !== shownId) return;
       if (c.slide === h.slide && c.box) putBox(c, c.id === shownId ? "shown" : "faint", c.id);
     });
     if (draft && draft.box && draft.slide === h.slide) putBox(draft, "pending", "new");

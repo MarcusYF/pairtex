@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Review page.** Once the author presses **Keep** on an answer, that comment's box is no longer drawn on the slide; it
+  shows again only while the comment is selected in the list. (Fan, 2026-11-12.)
+
 ## 0.1.0 (2026-11-12)
 
 The first release, as part of PairLab.
