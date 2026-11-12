@@ -1,0 +1,2260 @@
+#!/usr/bin/env python3
+"""pairdeck (PairDeck): animated HTML explainer decks, a comment loop on the slides, and a visual-style guide that learns.
+
+The agent builds a deck with the bundled engine (`pairdeck new`), checks every slide on screenshots (`pairdeck qa`) and
+records its version (`pairdeck snapshot`). The author opens the deck in the local review page (`pairdeck review`), drags a box
+on a slide and types a comment. `pairdeck watch` waits for comments and for the author's own edits to the deck files, lets them
+settle, prints one batch and exits; that exit wakes the agent that started it in the background. The agent fixes the deck,
+answers each comment (`pairdeck resolve`, shown under the comment on the review page), snapshots again, learns from the
+evidence (`pairdeck learn`), and starts `pairdeck watch` again.
+
+`pairdeck seed` reads the author's past decks (.pptx, .pdf, .html) through ../shared/seed_visual.py, so the style guide starts
+close to the author's taste.
+
+Data (profile, style vault, projects) lives in $PAIRDECK_HOME, else ~/.pairdeck (`pairdeck setup`). `pairdeck paths` prints
+where. Standard library only (Python 3.9+), plus git for the data home and Chrome or Chromium for screenshots (`CHROME=`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import base64
+import datetime as dt
+import difflib
+import fcntl
+import fnmatch
+import filecmp
+import functools
+import glob
+import hashlib
+import html as htmlmod
+import http.server
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import zlib
+from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
+from pathlib import Path
+
+VERSION = "0.1.0"
+APP = Path(__file__).resolve().parent.parent
+SKILL = APP / "skill"
+ENGINE = SKILL / "assets" / "engine"
+TEMPLATE = SKILL / "assets" / "template.html"
+TEMPLATES = APP / "templates"
+REVIEW_ASSETS = APP / "review"
+SEED_SCRIPT = APP.parent / "shared" / "seed_visual.py"
+DEFAULT_HOME = Path.home() / ".pairdeck"
+
+EXIT_BATCH, EXIT_NOTHING, EXIT_MISSING, EXIT_UNSNAPPED, EXIT_LOCKED = 0, 1, 2, 4, 5
+
+
+def home_env() -> str:
+    return os.environ.get("PAIRDECK_HOME", "")
+
+
+def data_home() -> Path:
+    env = home_env()
+    return Path(env).expanduser() if env else DEFAULT_HOME
+
+
+DATA = data_home()
+PROFILE_PATH = DATA / "profile.json"
+
+
+def load_profile() -> dict:
+    if not PROFILE_PATH.exists():
+        return {}
+    try:
+        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        sys.exit(f"pairdeck: {PROFILE_PATH} is not valid JSON: {exc}")
+
+
+PROFILE = load_profile()
+
+
+def vault_dir() -> Path:
+    v = PROFILE.get("vault")
+    if v:
+        p = Path(v).expanduser()
+        return p if p.is_absolute() else DATA / p
+    return DATA / "vault"
+
+
+PROJECTS = DATA / "projects"
+VAULT = vault_dir()
+STYLE_MD = VAULT / "STYLE.md"
+EVIDENCE = VAULT / "evidence.jsonl"
+SEEDS = VAULT / "seed"
+AGENT = PROFILE.get("agent", "Claude")
+HANDLE = PROFILE.get("handle") or "Author"
+
+
+class PdError(Exception):
+    def __init__(self, message: str, code: int = 1):
+        super().__init__(message)
+        self.code = code
+
+
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def sha1(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def clip(text: str, n: int = 4000) -> str:
+    text = text or ""
+    return text if len(text) <= n else text[:n] + " …[clipped]"
+
+
+def first_word(name: str) -> str:
+    return (name or "").split()[0] if (name or "").split() else ""
+
+
+def read_text(path) -> str:
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def write_text(path, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def write_json(path: Path, obj) -> None:
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def git(repo: Path, *args: str, check: bool = True) -> str:
+    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0", LC_ALL="C"))
+    if check and r.returncode != 0:
+        raise PdError(f"git {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+# ------------------------------------------------------------------------------------ evidence (style)
+
+class Locked:
+    """An exclusive flock on a file, as a context manager."""
+
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(path, "w")
+
+    def __enter__(self):
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def evidence_rows() -> list[dict]:
+    if not EVIDENCE.exists():
+        return []
+    out = []
+    for line in read_text(EVIDENCE).splitlines():
+        if line.strip():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    return out
+
+
+def append_events(events: list[dict]) -> list[str]:
+    """Append events to evidence.jsonl under its lock. Ids run on from the highest one, so an id is never reused."""
+    if not events:
+        return []
+    VAULT.mkdir(parents=True, exist_ok=True)
+    ids = []
+    with Locked(VAULT / ".evidence.lock"):
+        n = 0
+        for e in evidence_rows():
+            m = re.fullmatch(r"E(\d+)", str(e.get("id", "")))
+            if m:
+                n = max(n, int(m.group(1)))
+        seen = {e.get("source") for e in evidence_rows() if e.get("source")}
+        with open(EVIDENCE, "a", encoding="utf-8") as f:
+            for e in events:
+                if e.get("source") and e["source"] in seen:
+                    continue  # already recorded (a Keep click, a stated comment): one event per fact
+                n += 1
+                e = {"id": f"E{n:04d}", "date": now_iso(), **e}
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+                ids.append(e["id"])
+                if e.get("source"):
+                    seen.add(e["source"])
+    return ids
+
+
+def pending_events(project: str | None = None, every: bool = False) -> list[dict]:
+    """Events not yet acknowledged or discarded: of one project, or (every) all of them, seeds included."""
+    out = []
+    for e in evidence_rows():
+        if e.get("acked") or e.get("discarded"):
+            continue
+        if every or e.get("project") == project:
+            out.append(e)
+    return out
+
+
+def mark_events(ids: set, key: str, value: dict) -> int:
+    """Flag events (acked or discarded) under the evidence lock. Only adds fields; the log is never rewritten otherwise."""
+    flagged = 0
+    with Locked(VAULT / ".evidence.lock"):
+        rows = read_text(EVIDENCE).splitlines() if EVIDENCE.exists() else []
+        out = []
+        for line in rows:
+            if line.strip():
+                e = json.loads(line)
+                if e.get("id") in ids:
+                    e[key] = value
+                    flagged += 1
+                line = json.dumps(e, ensure_ascii=False)
+            out.append(line)
+        tmp = EVIDENCE.with_suffix(".tmp")
+        tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        os.replace(tmp, EVIDENCE)
+    return flagged
+
+
+def style_summary() -> str:
+    if not STYLE_MD.exists():
+        return f"{STYLE_MD} (missing: `pairdeck setup` creates it)"
+    text = read_text(STYLE_MD)
+    rules = len(re.findall(r"^### ", text, re.M))
+    rows = len([ln for ln in text.split("## Palette, type and layout", 1)[-1].split("\n## ", 1)[0].splitlines()
+                if ln.startswith("|") and not re.match(r"\|\s*-", ln)]) - 1 if "## Palette, type and layout" in text else 0
+    return f"{STYLE_MD} ({rules} entries, {max(rows, 0)} table rows, sha {sha1(text)[:7]})"
+
+
+# ------------------------------------------------------------------------------------ projects
+
+DEFAULT_WATCH = ["*.html", "*.htm", "*.css", "*.js", "*.svg", "*.md", "_deck/deck.css", "_deck/deck.js"]
+
+
+class Project:
+    def __init__(self, slug: str):
+        self.slug = slug
+        self.dir = PROJECTS / slug
+        cfg_path = self.dir / "project.json"
+        if not cfg_path.exists():
+            known = ", ".join(sorted(p.name for p in PROJECTS.iterdir() if (p / "project.json").exists())) \
+                if PROJECTS.exists() else ""
+            raise PdError(f"no deck '{slug}' in {PROJECTS} (known: {known or 'none'}). "
+                          f"Create one with: pairdeck new {slug} --title \"…\"", EXIT_MISSING)
+        self.cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        self.deck_dir = Path(self.cfg["dir"]).expanduser()
+        self.deck = self.deck_dir / self.cfg.get("file", "index.html")
+        self.title = self.cfg.get("title", slug)
+        self.watch = self.cfg.get("watch", DEFAULT_WATCH)
+        self.state_path = self.dir / "state.json"
+        self.lock_path = self.dir / "watch.lock"
+        self.server_path = self.dir / "server.json"
+        self.comments_path = self.dir / "comments.jsonl"
+        self.snaps = self.dir / "snapshots"
+
+    def save_cfg(self) -> None:
+        write_json(self.dir / "project.json", self.cfg)
+
+    def watched(self, rel: str) -> bool:
+        parts = rel.split("/")
+        if any(x.startswith(".") for x in parts):
+            return False
+        for pat in self.watch:
+            pp = pat.split("/")
+            if len(pp) == len(parts) and all(fnmatch.fnmatch(a, b) for a, b in zip(parts, pp)):
+                return True
+        return False
+
+    def files(self) -> list[str]:
+        """The deck's text files, relative to the deck folder (project.json "watch" globs; bundles in dist/ are not)."""
+        out = []
+        if not self.deck_dir.is_dir():
+            return out
+        for root, dirs, names in os.walk(self.deck_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", "dist")]
+            for n in names:
+                full = Path(root) / n
+                rel = full.relative_to(self.deck_dir).as_posix()
+                if self.watched(rel) and full.is_file() and full.stat().st_size < 4_000_000:
+                    out.append(rel)
+        return sorted(out)
+
+    def signature(self) -> dict:
+        sig = {}
+        for rel in self.files():
+            try:
+                s = (self.deck_dir / rel).stat()
+                sig[rel] = [s.st_mtime_ns, s.st_size]
+            except OSError:
+                pass
+        return sig
+
+    def contents(self) -> dict:
+        out = {}
+        for rel in self.files():
+            try:
+                out[rel] = read_text(self.deck_dir / rel)
+            except OSError:
+                pass
+        return out
+
+    def server(self) -> dict | None:
+        try:
+            info = json.loads(self.server_path.read_text())
+        except (OSError, ValueError):
+            return None
+        return info if pid_alive(int(info.get("pid", 0))) else None
+
+
+def project_slugs() -> list[str]:
+    if not PROJECTS.exists():
+        return []
+    return sorted(d.name for d in PROJECTS.iterdir() if (d / "project.json").exists())
+
+
+def empty_state() -> dict:
+    return {"sent": [], "base": None, "agent_snaps": [], "batches": 0}
+
+
+def load_state(p: Project) -> dict:
+    st = empty_state()
+    if p.state_path.exists():
+        try:
+            st.update(json.loads(p.state_path.read_text(encoding="utf-8")))
+        except ValueError:
+            pass
+    return st
+
+
+def save_state(p: Project, st: dict) -> None:
+    write_json(p.state_path, st)
+
+
+def lock_owner(p: Project) -> dict | None:
+    try:
+        info = json.loads(p.lock_path.read_text())
+    except (OSError, ValueError):
+        return None
+    return info if pid_alive(int(info.get("pid", 0))) else None
+
+
+def acquire_lock(p: Project, takeover: bool) -> None:
+    owner = lock_owner(p)
+    if owner and owner["pid"] != os.getpid():
+        if not takeover:
+            raise PdError(f"another watcher is running for {p.slug} (pid {owner['pid']}, since {owner['started']}). "
+                          f"Stop it, or pass --takeover to stop it and watch here.", EXIT_LOCKED)
+        os.kill(int(owner["pid"]), signal.SIGTERM)
+        for _ in range(50):
+            if not pid_alive(int(owner["pid"])):
+                break
+            time.sleep(0.1)
+    p.lock_path.write_text(json.dumps({"pid": os.getpid(), "started": now_iso()}))
+
+    def release(*_):
+        try:
+            if json.loads(p.lock_path.read_text()).get("pid") == os.getpid():
+                p.lock_path.unlink()
+        except (OSError, ValueError):
+            pass
+
+    atexit.register(release)
+
+    def on_signal(signum, _frame):
+        release()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+
+def ensure_not_watching(p: Project, what: str) -> None:
+    owner = lock_owner(p)
+    if owner:
+        raise PdError(f"a watcher is running for {p.slug} (pid {owner['pid']}). {what} happens between watcher runs: "
+                      f"wait for its batch (it exits by itself), or stop it first.", EXIT_LOCKED)
+
+
+# ------------------------------------------------------------------------------------ the deck engine
+
+CSS_RE = re.compile(r'<link[^>]+href="([^"]*?)deck\.css"[^>]*>')
+JS_RE = re.compile(r'<script[^>]+src="([^"]*?)deck\.js"[^>]*>\s*</script>')
+
+
+def engine_prefix(page: str) -> str | None:
+    """The URL prefix the deck uses for the engine, e.g. '_deck/' or '/decks/_deck/'."""
+    m = CSS_RE.search(page)
+    return m.group(1) if m else None
+
+
+def find_engine(deck_path, page: str, explicit=None):
+    """(engine_dir, serve_root) for a deck: the engine folder on disk, and a folder to serve so its URL resolves."""
+    deck_dir = os.path.dirname(os.path.abspath(deck_path))
+    if explicit:
+        return os.path.abspath(explicit), None
+    prefix = engine_prefix(page)
+    if prefix is None or prefix.startswith(("http://", "https://", "//")):
+        return None, None
+    if prefix.startswith("/"):  # root-relative (a website's /decks/_deck/): look for an ancestor that holds it
+        rel = prefix.strip("/")
+        d = deck_dir
+        while True:
+            cand = os.path.join(d, rel)
+            if os.path.isfile(os.path.join(cand, "deck.css")):
+                return cand, d
+            parent = os.path.dirname(d)
+            if parent == d:
+                return None, None
+            d = parent
+    eng = os.path.normpath(os.path.join(deck_dir, prefix))
+    if os.path.isfile(os.path.join(eng, "deck.css")):
+        return eng, os.path.commonpath([deck_dir, eng])
+    return None, None
+
+
+def find_chrome() -> str:
+    cands = [os.environ.get("CHROME"),
+             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+             "/Applications/Chromium.app/Contents/MacOS/Chromium",
+             shutil.which("google-chrome"), shutil.which("google-chrome-stable"),
+             shutil.which("chromium"), shutil.which("chromium-browser")]
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    raise PdError("Chrome or Chromium not found; set CHROME=/path/to/chrome")
+
+
+def run_chrome(cmd, **kw):
+    """Run headless Chrome with a throwaway profile (Chrome otherwise leaves a profile folder behind on every launch) and
+    a mock keychain (on macOS, Chrome can otherwise wait for keychain access and never finish)."""
+    profile = tempfile.mkdtemp(prefix="pairdeck-chrome-")
+    try:
+        return subprocess.run([cmd[0], f"--user-data-dir={profile}", "--use-mock-keychain", *cmd[1:]], **kw)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+def resolve_deck(arg: str) -> tuple[Path, Project | None]:
+    """A registered slug, or a path to a deck's HTML file (or its folder)."""
+    if arg in project_slugs():
+        p = Project(arg)
+        if not p.deck.exists():
+            raise PdError(f"{p.deck} does not exist (moved? fix \"dir\" in {p.dir / 'project.json'})", EXIT_MISSING)
+        return p.deck, p
+    path = Path(arg).expanduser()
+    if path.is_dir():
+        path = path / "index.html"
+    if not path.exists():
+        raise PdError(f"no deck '{arg}': neither a registered slug ({', '.join(project_slugs()) or 'none'}) nor a file",
+                      EXIT_MISSING)
+    path = path.resolve()
+    for slug in project_slugs():  # a path to a registered deck still counts as that project
+        q = Project(slug)
+        if q.deck.exists() and q.deck.resolve() == path:
+            return path, q
+    return path, None
+
+
+# ------------------------------------------------------------------------------------ new (scaffold)
+
+def copy_engine(dest: Path) -> None:
+    if dest.exists():
+        cmp = filecmp.dircmp(str(ENGINE), str(dest))
+        if cmp.diff_files or cmp.left_only:
+            print(f"note: {dest} differs from the bundled engine; left as is (delete it to copy the engine again)")
+        return
+    shutil.copytree(ENGINE, dest)
+
+
+def free_port(start: int) -> int:
+    for port in list(range(start, start + 50)) + [0]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return s.getsockname()[1]
+            except OSError:
+                continue
+    return 0
+
+
+def register(slug: str, deck_dir: Path, file: str, title: str, engine: str) -> Project:
+    d = PROJECTS / slug
+    d.mkdir(parents=True, exist_ok=True)
+    cfg_path = d / "project.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    cfg.update(slug=slug, title=title, dir=str(deck_dir), file=file, engine=engine)
+    cfg.setdefault("created", now_iso())
+    cfg.setdefault("watch", DEFAULT_WATCH)
+    cfg.setdefault("port", free_port(8700 + zlib.crc32(slug.encode()) % 200))
+    write_json(cfg_path, cfg)
+    notes = d / "NOTES.md"
+    if not notes.exists():
+        tpl = TEMPLATES / "NOTES.template.md"
+        text = read_text(tpl) if tpl.exists() else "# {title}: deck notes\n"
+        notes.write_text(text.replace("{title}", title).replace("{deck}", str(deck_dir / file)), encoding="utf-8")
+    return Project(slug)
+
+
+def cmd_new(args) -> int:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", args.slug):
+        raise PdError("the slug is a short lowercase name: letters, digits and hyphens (e.g. simpsons-paradox)")
+    if not PROFILE_PATH.exists():
+        raise PdError("no profile yet: run `pairdeck setup --name \"Your Name\"` first")
+    out_dir = Path(args.dir).expanduser().absolute() if args.dir else Path.cwd() / args.slug
+    target = out_dir / args.file
+    title_text = args.title.replace("|", " ").strip()
+    if target.exists() and not args.force:
+        page = read_text(target)
+        engine = engine_prefix(page) or ""
+        p = register(args.slug, out_dir, args.file, title_text, engine)
+        st = load_state(p)
+        if not st.get("base"):
+            take_snapshot(p, st, "author", "the deck as registered (the author's own version)")
+            save_state(p, st)
+        print(f"Registered the existing deck {target} as {args.slug} (nothing overwritten; --force replaces it).")
+        print(f"Its current version is the baseline: edits from now on are the author's own edits.")
+        return 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.engine_url:
+        engine = args.engine_url if args.engine_url.endswith("/") else args.engine_url + "/"
+    else:
+        copy_engine(out_dir / "_deck")
+        engine = "_deck/"
+    title_html = "<br>".join(htmlmod.escape(x.strip(), quote=False) for x in args.title.split("|"))
+    esc = lambda s: htmlmod.escape(s, quote=True).replace("&#x27;", "'")  # noqa: E731  (attributes use double quotes)
+    page = read_text(TEMPLATE)
+    for key, val in {
+        "LANG": args.lang, "TITLE_TEXT": esc(title_text), "TITLE_HTML": title_html,
+        "SUBTITLE": esc(args.subtitle), "META": esc(args.meta),
+        "DESCRIPTION": esc(args.description or args.subtitle), "ENGINE": engine,
+        "BACK_LINK": f'<a href="{esc(args.back_url)}">← {esc(args.back_label)}</a>' if args.back_url else "<span></span>",
+        "SOURCE_LINK": (f'<a href="{esc(args.source_url)}" target="_blank" rel="noopener">{esc(args.source_label)} ↗</a>'
+                        if args.source_url else "<span></span>"),
+        "NOTE_LINKS": (f'<a href="{esc(args.source_url)}" target="_blank" rel="noopener">{esc(args.source_label)}</a>'
+                       if args.source_url else "TODO: links for readers who want more (or delete this note)"),
+    }.items():
+        page = page.replace("{{" + key + "}}", val)
+    write_text(target, page)
+    p = register(args.slug, out_dir, args.file, title_text, engine)
+    print(f"Created {target}")
+    print(f"Engine: {engine}" + ("" if args.engine_url else f" (copied to {out_dir / '_deck'})"))
+    print(f"Registered as {args.slug}: {p.dir}")
+    print(f"Next: write the slides (replace every TODO), `pairdeck qa {args.slug}`, look at every screenshot, "
+          f"then `pairdeck snapshot {args.slug}`.")
+    return 0
+
+
+# ------------------------------------------------------------------------------------ qa: lint, layout check, screenshots
+
+MODES = {"light": ("1280,800", []), "dark": ("1280,800", ["--force-dark-mode"]), "narrow": ("520,900", [])}
+VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+
+# ---------------------------------------------------------------- tiny DOM for linting
+class Node:
+    def __init__(self, tag, attrs, parent):
+        self.tag, self.attrs, self.parent, self.children, self.text = tag, dict(attrs), parent, [], []
+
+    def cls(self):
+        return set((self.attrs.get("class") or "").split())
+
+    def walk(self):
+        for c in self.children:
+            yield c
+            yield from c.walk()
+
+    def ancestors(self):
+        p = self.parent
+        while p is not None:
+            yield p
+            p = p.parent
+
+    def all_text(self):
+        out = list(self.text)
+        for c in self.children:
+            out.append(c.all_text())
+        return " ".join(out)
+
+
+class Tree(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = Node("#root", {}, None)
+        self.cur = self.root
+
+    def handle_starttag(self, tag, attrs):
+        n = Node(tag, attrs, self.cur)
+        self.cur.children.append(n)
+        if tag not in VOID:
+            self.cur = n
+
+    def handle_startendtag(self, tag, attrs):
+        self.cur.children.append(Node(tag, attrs, self.cur))
+
+    def handle_endtag(self, tag):
+        n = self.cur
+        while n is not self.root and n.tag != tag:
+            n = n.parent
+        if n is not self.root:
+            self.cur = n.parent
+
+    def handle_data(self, data):
+        self.cur.text.append(data)
+
+
+def lint(page, engine_dir, bundled):
+    errors, warnings = [], []
+    t = Tree()
+    t.feed(page)
+    nodes = list(t.root.walk())
+    slides = [n for n in nodes if "dk-slide" in n.cls()]
+
+    if engine_dir is None and not bundled:
+        errors.append("engine not found: the deck.css link does not resolve on disk (use --root or fix the href)")
+    if not slides:
+        errors.append("no <section class=\"dk-slide\"> found")
+    elif not 6 <= len(slides) <= 10:
+        warnings.append(f"{len(slides)} slides (the usual range is 6–10)")
+    if re.search(r"\bTODO\b|FIXME|lorem ipsum", page, re.I):
+        errors.append("unfinished placeholders (TODO/FIXME/lorem) remain")
+    if re.search(r"(?:/Users|/home)/[\w.-]+/", page):
+        warnings.append("a local absolute path (a home folder) appears in the page")
+    if slides and not any(n.tag == "h1" and "dk-h" in n.cls() for n in slides[0].walk()):
+        warnings.append("title slide has no <h1 class=\"dk-h\">")
+
+    if bundled:
+        sprite_ids = {i[len("dkicon-"):] for i in re.findall(r'<symbol id="(dkicon-[\w-]+)"', page)}
+    elif engine_dir and os.path.exists(os.path.join(engine_dir, "icons.svg")):
+        sprite_ids = set(re.findall(r'<symbol id="([^"]+)"', read_text(os.path.join(engine_dir, "icons.svg"))))
+    else:
+        sprite_ids = set()
+
+    for i, s in enumerate(slides, 1):
+        sub = list(s.walk())
+        if i > 1 and not s.attrs.get("data-label"):
+            warnings.append(f"slide {i}: no data-label (small grey section label)")
+        if i > 1 and not any(n.tag in ("svg", "img", "canvas", "figure") or "dk-list" in n.cls() for n in sub):
+            warnings.append(f"slide {i}: no picture (svg/img/figure); text-only slides break the style")
+        small = [n for n in sub if n.tag in ("text", "g") and _num(n.attrs.get("font-size")) and _num(n.attrs.get("font-size")) < 15
+                 and not any("dk-badge" in x.cls() for x in [n, *n.ancestors()])]
+        if small:
+            warnings.append(f"slide {i}: {len(small)} SVG text element(s) under font-size 15")
+        words = len(_running_text(s).split())
+        if words > 75:
+            warnings.append(f"slide {i}: about {words} words of running text (outside figures, notes and controls); aim for far fewer")
+        dashed_draw = [n for n in sub if n.tag == "path" and {"dash", "dk-draw"} <= n.cls()]
+        if dashed_draw and "p.dataset.fade" not in page and engine_dir and "p.dataset.fade" not in read_text(os.path.join(engine_dir, "deck.js")):
+            warnings.append(f"slide {i}: dashed path with .dk-draw draws solid with this (older) engine; drop .dk-draw or update the engine")
+
+    for n in nodes:
+        if (n.tag == "input" and n.attrs.get("type") == "range") or (n.tag == "button" and "dk-btn" in n.cls()):
+            if not any("data-interactive" in a.attrs for a in n.ancestors()) and "data-interactive" not in n.attrs:
+                warnings.append(f"<{n.tag} class=\"{n.attrs.get('class', '')}\"> is not inside [data-interactive]; clicks will also advance the slide")
+        if n.tag == "use":
+            ref = n.attrs.get("href") or n.attrs.get("xlink:href") or ""
+            m = re.search(r"(?:icons\.svg#|#dkicon-)([\w-]+)$", ref)
+            if m and sprite_ids and m.group(1) not in sprite_ids:
+                errors.append(f"unknown icon '{m.group(1)}' (available: {', '.join(sorted(sprite_ids))})")
+        if n.tag == "a" and (n.attrs.get("href") or "").strip() in ("", "#"):
+            warnings.append(f"placeholder link <a href=\"{n.attrs.get('href', '')}\">{''.join(n.text).strip()[:30]}</a>")
+        if n.tag == "img" and not n.attrs.get("alt"):
+            warnings.append(f"<img src=\"{n.attrs.get('src')}\"> has no alt text")
+        if n.tag in ("script", "link") and re.match(r"(https?:)?//", n.attrs.get("src") or n.attrs.get("href") or ""):
+            warnings.append(f"external resource: {n.attrs.get('src') or n.attrs.get('href')} (decks should be self-contained)")
+    body = page[page.find("<body"):] if "<body" in page else page
+    body = re.sub(r"<style>.*?</style>", "", body, flags=re.S)
+    hexes = re.findall(r'(?:fill|stroke|color|background)\s*[:=]\s*"?\s*(#[0-9a-fA-F]{3,8})', body)
+    if hexes:
+        warnings.append(f"{len(hexes)} hard-coded colour(s) such as {hexes[0]}; use role classes so dark mode works")
+    if not re.search(r'<meta[^>]+name="description"', page):
+        warnings.append("no <meta name=\"description\">")
+    return slides, errors, warnings
+
+
+def _num(v):
+    try:
+        return float(str(v).replace("px", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+SKIP_TEXT_CLASSES = {"dk-note", "dk-meta", "dk-hint", "dk-ctl", "dk-cap", "dk-label", "dk-list"}
+
+
+def _running_text(slide):
+    out = []
+
+    def rec(n):
+        if n.tag in ("svg", "script", "style", "nav", "figure", "button", "a") or n.cls() & SKIP_TEXT_CLASSES:
+            return
+        out.extend(n.text)
+        for c in n.children:
+            rec(c)
+    rec(slide)
+    return re.sub(r"[·•|]", " ", " ".join(out))
+
+
+# ---------------------------------------------------------------- browser-side helpers
+STEP_ALL = """
+function dkQaStepAll(i, upto) {
+  if (i !== undefined) Deck.go(i);
+  var s = document.querySelectorAll(".dk-slide")[Deck.index];
+  var n = new Set(Array.prototype.map.call(s.querySelectorAll("[data-step]"), function (e) { return e.dataset.step; })).size;
+  if (upto !== undefined) n = Math.min(n, upto);
+  for (var k = 0; k < n; k++) Deck.next();
+  return s;
+}
+"""
+
+NO_MOTION = """<style>.dk-rotate{display:none!important}
+/* Headless Chrome does not advance CSS transitions under a virtual time budget, so show final states at once. */
+*,*::before,*::after{transition:none!important;animation:none!important}</style>
+"""
+
+
+def shot_inject(after):
+    # ?qastep=N in the URL stops after N build steps (for --steps); otherwise all steps are shown.
+    return NO_MOTION + "<script>" + STEP_ALL + """
+window.addEventListener("load", function () {
+  setTimeout(function () {
+    if (!window.Deck) return;
+    var m = /[?&]qastep=(\\d+)/.exec(location.search);
+    dkQaStepAll(undefined, m ? Number(m[1]) : undefined);
+    try { (function () { %s })(); } catch (e) { console.error(e); }
+  }, 150);
+});
+</script>
+""" % (after or "")
+
+
+LAYOUT = NO_MOTION + "<script>" + STEP_ALL + r"""
+window.addEventListener("load", function () { (document.fonts ? document.fonts.ready : Promise.resolve()).then(function () {
+  setTimeout(function () {
+    var out = [], slides = document.querySelectorAll(".dk-slide");
+    function shown(el, stop) {
+      for (var e = el; e && e !== stop; e = e.parentNode) {
+        if (e.nodeType !== 1) continue;
+        var cs = getComputedStyle(e);
+        if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) return false;
+      }
+      return true;
+    }
+    function inter(a, b) { var w = Math.min(a.right, b.right) - Math.max(a.left, b.left), h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top); return w > 0 && h > 0 ? w * h : 0; }
+    function label(t) { var x = t.textContent.replace(/\s+/g, " ").trim(); return x.length > 32 ? x.slice(0, 30) + "…" : x; }
+    for (var i = 0; i < slides.length; i++) {
+      var s = dkQaStepAll(i), issues = [];
+      if (s.scrollWidth > s.clientWidth + 4) issues.push("content overflows the slide sideways");
+      var roots = Array.prototype.filter.call(s.querySelectorAll("svg"), function (v) { return !v.ownerSVGElement; });
+      roots.forEach(function (root) {
+        var R = root.getBoundingClientRect();
+        var texts = Array.prototype.filter.call(root.querySelectorAll("text"), function (t) { return t.textContent.trim() && !t.closest("symbol,defs") && shown(t, s); })
+          .map(function (t) { return { t: t, r: t.getBoundingClientRect() }; });
+        var boxes = Array.prototype.filter.call(root.querySelectorAll("rect"), function (b) { return !b.closest("symbol,defs") && shown(b, s); })
+          .map(function (b) { return b.getBoundingClientRect(); }).filter(function (r) { return r.width > 24 && r.height > 14; });
+        texts.forEach(function (a, ia) {
+          var r = a.r;
+          if (r.left < R.left - 3 || r.right > R.right + 3 || r.top < R.top - 3 || r.bottom > R.bottom + 3) issues.push("label runs past the figure edge: “" + label(a.t) + "”");
+          for (var ib = ia + 1; ib < texts.length; ib++) {
+            var b = texts[ib].r, x = inter(r, b), m = Math.min(r.width * r.height, b.width * b.height);
+            // The same label drawn on top of itself is a deliberate highlight overlay, not a collision.
+            if (a.t.textContent.trim() === texts[ib].t.textContent.trim()) continue;
+            if (m > 0 && x / m > 0.25) issues.push("labels overlap: “" + label(a.t) + "” / “" + label(texts[ib].t) + "”");
+          }
+          var cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+          boxes.forEach(function (B) {
+            var inside = cx > B.left && cx < B.right && cy > B.top && cy < B.bottom;
+            var contained = r.left >= B.left - 2 && r.right <= B.right + 2 && r.top >= B.top - 2 && r.bottom <= B.bottom + 2;
+            if (inside && !contained && r.width < B.width * 3) issues.push("label spills out of its box: “" + label(a.t) + "”");
+          });
+        });
+      });
+      // (1.4.0) Text on a box whose fill barely contrasts with it (e.g. a fill class that does not exist falls back to black).
+      function rgb(c) { var m = /rgba?\(([^)]+)\)/.exec(c || ""); if (!m) return null; var v = m[1].split(",").map(parseFloat); return { r: v[0], g: v[1], b: v[2], a: v.length > 3 ? v[3] : 1 }; }
+      function lum(c) { var f = function (x) { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); }
+      roots.forEach(function (root) {
+        var shapes = Array.prototype.filter.call(root.querySelectorAll("rect,circle,ellipse"), function (b) { return !b.closest("symbol,defs") && shown(b, s); });
+        Array.prototype.filter.call(root.querySelectorAll("text"), function (t) { return t.textContent.trim() && !t.closest("symbol,defs,.dk-badge") && shown(t, s); }).forEach(function (t) {
+          var r = t.getBoundingClientRect(), cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, tc = rgb(getComputedStyle(t).fill);
+          shapes.forEach(function (b) {
+            var B = b.getBoundingClientRect(); if (!(cx > B.left && cx < B.right && cy > B.top && cy < B.bottom)) return;
+            var cs = getComputedStyle(b), fc = rgb(cs.fill); if (!fc || !tc || cs.fill === "none") return;
+            var op = fc.a * parseFloat(cs.fillOpacity || 1) * parseFloat(cs.opacity || 1); if (op < 0.5) return;
+            var l1 = lum(fc), l2 = lum(tc), ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+            if (ratio < 3) issues.push("low contrast: “" + label(t) + "” on its box (ratio " + ratio.toFixed(1) + "; missing fill class?)");
+          });
+        });
+        // (1.4.0) Arrows and connector lines that end inside an icon or a node instead of at its edge.
+        var targets = Array.prototype.filter.call(root.querySelectorAll("svg.icon, circle, rect"), function (b) { return !b.closest("symbol,defs") && shown(b, s); })
+          .map(function (b) { return b.getBoundingClientRect(); }).filter(function (B) { return B.width > 16 && B.height > 16 && B.width < 400; });
+        Array.prototype.filter.call(root.querySelectorAll("path[marker-end], path.ln"), function (p) { return !p.closest("symbol,defs") && shown(p, s) && p.getTotalLength && p.getTotalLength() > 20; }).forEach(function (p) {
+          var M = p.getScreenCTM(); if (!M) return; var L = p.getTotalLength();
+          [L].forEach(function (at) {
+            var q = p.getPointAtLength(at), x = M.a * q.x + M.c * q.y + M.e, y = M.b * q.x + M.d * q.y + M.f;
+            targets.forEach(function (B) {
+              var ix = B.width * 0.25, iy = B.height * 0.25;
+              if (x > B.left + ix && x < B.right - ix && y > B.top + iy && y < B.bottom - iy) issues.push("an arrow ends inside a shape (stop it at the shape's edge)");
+            });
+          });
+        });
+      });
+      // (1.4.0) ASCII sub- and superscripts in visible text: render them as real subscripts or with MathJax.
+      Array.prototype.forEach.call(s.querySelectorAll("text, p, li, h2, td, span"), function (t) {
+        if (t.closest("code, pre, a, symbol, defs") || !shown(t, s) || t.children.length && t.tagName !== "text") return;
+        var x = t.textContent; if (/[A-Za-zα-ωΣ]_[A-Za-z0-9{]|[A-Za-z)]\^[A-Za-z0-9{(]/.test(x) && !/[\/]|\.(py|json|md|html)\b/.test(x)) issues.push("ASCII sub/superscript in visible text: “" + label(t) + "”");
+      });
+      // (1.4.1) The headline (often two lines) running into the small section label at the top left.
+      var lab_ = s.querySelector(".dk-label"), h_ = s.querySelector(".dk-h");
+      if (lab_ && h_) { var A_ = lab_.getBoundingClientRect(), H_ = h_.getBoundingClientRect(), r_ = document.createRange(); r_.selectNodeContents(h_);
+        Array.prototype.some.call(r_.getClientRects(), function (q) { var g = q.height * 0.18; if (q.left < A_.right - 2 && q.right > A_.left + 2 && q.top + g < A_.bottom - 2 && q.bottom - g > A_.top + 2) { issues.push("the headline runs into the section label (shorten it to one line)"); return true; } return false; }); }
+      // (1.4.2) The slide itself taller than the window (at the check's window size): the bottom of the note is cut off.
+      if (s.scrollHeight > s.clientHeight + 24) issues.push("the slide is " + Math.round(s.scrollHeight - s.clientHeight) + "px taller than the window; shorten the note or the figure");
+      // (1.4.1) Content hidden behind a scroll box: screenshots and the PDF show only the visible part.
+      Array.prototype.forEach.call(s.querySelectorAll("*"), function (b) {
+        var cs = getComputedStyle(b); if (!/(auto|scroll)/.test(cs.overflowY + cs.overflowX) || !shown(b, s)) return;
+        if (b.scrollHeight > b.clientHeight + 4 || b.scrollWidth > b.clientWidth + 4) issues.push("content scrolls inside a box (" + Math.round(b.scrollHeight - b.clientHeight) + "px hidden); the PDF cuts it — split the slide or shorten");
+      });
+      // (1.4.1) A data line drawn through an SVG label (gridlines, axes and labels with the .knock halo are exempt).
+      var dl = Array.prototype.filter.call(s.querySelectorAll("svg path, svg polyline, svg line"), function (p) {
+        if (p.closest("symbol,defs,marker") || !shown(p, s) || !p.getTotalLength) return false;
+        var c = (p.getAttribute("class") || ""); if (/\bs-line\b|\bs-ink\b/.test(c)) return false;
+        return parseFloat(getComputedStyle(p).strokeWidth) >= 1.5 && getComputedStyle(p).stroke !== "none";
+      });
+      Array.prototype.forEach.call(s.querySelectorAll("svg text"), function (t) {
+        if (t.closest("symbol,defs") || !shown(t, s) || /\bknock\b/.test(t.getAttribute("class") || "")) return;
+        var B = t.getBoundingClientRect(); if (B.width < 4) return;
+        dl.some(function (p) {
+          var M = p.getScreenCTM(), L = p.getTotalLength(); if (!M || L < 30) return false;
+          for (var at = 0; at <= L; at += 3) {
+            var q = p.getPointAtLength(at), x = M.a * q.x + M.c * q.y + M.e, y = M.b * q.x + M.d * q.y + M.f;
+            if (x > B.left + 3 && x < B.right - 3 && y > B.top + 3 && y < B.bottom - 3) { issues.push("a line runs through the label “" + label(t) + "” (move it or add class knock)"); return true; }
+          }
+          return false;
+        });
+      });
+      var seen = {};
+      issues = issues.filter(function (x) { if (seen[x]) return false; seen[x] = 1; return true; });
+      if (issues.length) out.push({ slide: i + 1, issues: issues.slice(0, 8), more: Math.max(0, issues.length - 8) });
+    }
+    var pre = document.createElement("pre"); pre.id = "qa-layout"; pre.textContent = JSON.stringify({vh: window.innerHeight, items: out}); document.body.appendChild(pre);
+  }, 200);
+}); });
+</script>
+"""
+
+
+class Quiet(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+def parse_slides(spec, n):
+    if not spec:
+        return list(range(1, n + 1))
+    out = []
+    for part in spec.split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return [i for i in out if 1 <= i <= n]
+
+
+def contact_sheet(out, title):
+    pngs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(out, "*.png")))
+    groups = {}
+    for p in pngs:
+        groups.setdefault(p.rsplit("-", 1)[0], []).append(p)
+    rows = "".join(f"<h2>{htmlmod.escape(g)}</h2><div class=g>" + "".join(
+        f'<figure><img src="{p}" loading="lazy"><figcaption>{p}</figcaption></figure>' for p in ps) + "</div>"
+        for g, ps in groups.items())
+    write_text(os.path.join(out, "index.html"),
+          f"<!doctype html><meta charset=utf-8><title>QA · {htmlmod.escape(os.path.basename(title))}</title><style>body{{font:14px system-ui;margin:24px}}"
+          f".g{{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}}img{{width:100%;border:1px solid #ddd}}"
+          f"figure{{margin:0}}</style><h1>{htmlmod.escape(title)}</h1>{rows}")
+
+
+
+def cmd_qa(args) -> int:
+    deck_path, p = resolve_deck(args.deck)
+    deck = str(deck_path)
+    page = read_text(deck)
+    bundled = "window.Deck = {" in page and 'class="dk-sprite"' in page
+    engine_dir, root = (None, None) if bundled else find_engine(deck, page)
+    if args.root:
+        root = os.path.abspath(os.path.expanduser(args.root))
+    slides, errors, warnings = lint(page, engine_dir, bundled)
+
+    print(f"Deck: {deck}")
+    print(f"Slides: {len(slides)} · engine: {'inlined (single file)' if bundled else engine_dir or 'NOT FOUND'}")
+    if args.no_shots or not slides:
+        for e in errors:
+            print(f"  ERROR   {e}")
+        for w in warnings:
+            print(f"  warning {w}")
+        if not errors and not warnings:
+            print("  lint: clean")
+        return 1 if errors else 0
+    if root is None:
+        root = os.path.dirname(deck)
+    if os.path.commonpath([root, deck]) != root:
+        raise PdError(f"--root {root} does not contain the deck")
+
+    name = os.path.splitext(os.path.basename(deck))[0]
+    folder = os.path.basename(os.path.dirname(deck))
+    if args.out:
+        out = os.path.abspath(os.path.expanduser(args.out))
+    elif p:
+        out = str(p.dir / "qa")
+    else:
+        out = os.path.join(tempfile.gettempdir(), "pairdeck-qa", name if name != "index" else folder)
+    os.makedirs(out, exist_ok=True)
+    tmp_shot = os.path.join(os.path.dirname(deck), f".qa-{name}.html")
+    tmp_layout = os.path.join(os.path.dirname(deck), f".qa-{name}-layout.html")
+    write_text(tmp_shot, page.replace("</body>", shot_inject(args.after) + "</body>", 1))
+    write_text(tmp_layout, page.replace("</body>", LAYOUT + "</body>", 1))
+
+    handler = functools.partial(Quiet, directory=root)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}/"
+    url = base + os.path.relpath(tmp_shot, root).replace(os.sep, "/")
+    try:
+        chrome = find_chrome()
+    except PdError:
+        srv.shutdown()
+        for f in (tmp_shot, tmp_layout):
+            if os.path.exists(f):
+                os.remove(f)
+        raise
+    modes = [m for m in args.modes.split(",") if m in MODES]
+    nums = parse_slides(args.slides, len(slides))
+    suffix = f"-{args.tag}" if args.tag else ""
+    common = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-prefers-reduced-motion"]
+
+    def shoot(job):
+        mode, i, step = job
+        size, extra = MODES[mode]
+        png = os.path.join(out, f"{mode}{suffix}-{i:02d}" + (f"-step{step}" if step is not None else "") + ".png")
+        if os.path.exists(png):
+            os.remove(png)
+        target = url + (f"?qastep={step}" if step is not None else "") + f"#{i}"
+        run_chrome(common + ["--virtual-time-budget=4000", f"--window-size={size}", f"--screenshot={png}", *extra, target],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        return png
+
+    jobs = [(m, i, None) for m in modes for i in nums]
+    if args.steps:
+        for i in nums:
+            n = len({x.attrs.get("data-step") for x in slides[i - 1].walk() if "data-step" in x.attrs})
+            jobs += [(m, i, k) for m in modes for k in range(0, n)]
+
+    layout = []
+    pngs = []
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            pngs = list(pool.map(shoot, jobs))
+        if not args.no_layout:
+            # Measure at the design viewport (1280x800). Headless --dump-dom can report a shorter innerHeight than the
+            # window size, so read it back and rerun once with the window enlarged by the difference.
+            win_h, res = 800, None
+            for _ in range(2):
+                r = run_chrome(common + ["--virtual-time-budget=10000", f"--window-size=1280,{win_h}", "--dump-dom",
+                                         base + os.path.relpath(tmp_layout, root).replace(os.sep, "/")],
+                               capture_output=True, text=True, timeout=180)
+                m = re.search(r'<pre id="qa-layout">(.*?)</pre>', r.stdout, re.S)
+                if not m:
+                    res = None
+                    break
+                res = json.loads(htmlmod.unescape(m.group(1)))
+                if abs(res["vh"] - 800) <= 2:
+                    break
+                win_h += 800 - res["vh"]
+            if res:
+                layout = res["items"]
+            else:
+                warnings.append("layout check did not complete (run with --no-layout to skip)")
+    finally:
+        srv.shutdown()
+        for f in (tmp_shot, tmp_layout):
+            if os.path.exists(f):
+                os.remove(f)
+
+    for item in layout:
+        if args.slides and item["slide"] not in nums:
+            continue
+        for issue in item["issues"]:
+            warnings.append(f"slide {item['slide']}: {issue}")
+        if item["more"]:
+            warnings.append(f"slide {item['slide']}: … and {item['more']} more layout issue(s)")
+    for e in errors:
+        print(f"  ERROR   {e}")
+    for w in warnings:
+        print(f"  warning {w}")
+    if not errors and not warnings:
+        print("  lint and layout: clean")
+    missing = [x for x in pngs if not os.path.exists(x)]
+    contact_sheet(out, deck)
+    print(f"Screenshots: {len(pngs) - len(missing)} new in {out} (contact sheet of all: {os.path.join(out, 'index.html')})")
+    if missing:
+        print(f"  ERROR   {len(missing)} screenshot(s) failed, e.g. {missing[0]}")
+    print("Look at every screenshot before you show the deck (the checklist: skill/references/qa.md).")
+    return 1 if errors or missing else 0
+
+
+# ------------------------------------------------------------------------------------ bundle: one self-contained file
+
+ICON_ATTRS = {
+    "i": 'fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"',
+    "d": 'fill="currentColor" stroke="none"',
+}
+IMG_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+             ".svg": "image/svg+xml"}
+
+
+def inline_css(css: str, engine_dir: str, fonts: bool) -> str:
+    if not fonts:
+        return re.sub(r"@font-face\s*{[^}]*}\s*", "", css)
+
+    def data_uri(m):
+        with open(os.path.join(engine_dir, m.group(1)), "rb") as f:
+            return 'url("data:font/woff;base64,' + base64.b64encode(f.read()).decode() + '")'
+    return re.sub(r'url\("(fonts/[^"]+\.woff)"\)', data_uri, css)
+
+
+def sprite(engine_dir: str, used: set) -> str:
+    svg = read_text(os.path.join(engine_dir, "icons.svg"))
+    out = []
+    for sid in sorted(used):
+        m = re.search(r'<symbol id="%s"(.*?)</symbol>' % re.escape(sid), svg, re.S)
+        if not m:
+            print(f"warning: icon '{sid}' not in sprite")
+            continue
+        body = re.sub(r'class="(i|d)"', lambda k: ICON_ATTRS[k.group(1)], m.group(1))
+        out.append(f'<symbol id="dkicon-{sid}"{body}</symbol>')
+    if not out:
+        return ""
+    return ('<svg class="dk-sprite" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">'
+            + "".join(out) + "</svg>\n")
+
+
+def inline_images(page: str, base: str):
+    """Embed local images as data URIs: <img src> and SVG <image href> with a relative path."""
+    count, missing = [0], []
+
+    def sub(m):
+        attr, q, path = m.group(1), m.group(2), m.group(3)
+        if re.match(r"^(data:|https?:|//|/|#)", path):
+            return m.group(0)
+        f = os.path.normpath(os.path.join(base, path.split("#")[0].split("?")[0]))
+        mime = IMG_TYPES.get(os.path.splitext(f)[1].lower())
+        if not mime or not os.path.isfile(f):
+            missing.append(path)
+            return m.group(0)
+        with open(f, "rb") as fh:
+            count[0] += 1
+            return f'{attr}={q}data:{mime};base64,{base64.b64encode(fh.read()).decode()}{q}'
+    page = re.sub(r'(?<=<img )([^>]*?\bsrc)=(["\'])([^"\']+)\2', sub, page)
+    page = re.sub(r'(?<=<image )([^>]*?\b(?:xlink:)?href)=(["\'])([^"\']+)\2', sub, page)
+    return page, count[0], missing
+
+
+def cmd_bundle(args) -> int:
+    deck_path, p = resolve_deck(args.deck)
+    deck = str(deck_path)
+    page = read_text(deck)
+    engine_dir, _ = find_engine(deck, page, args.engine_dir)
+    if engine_dir is None:
+        engine_dir = str(ENGINE)
+        print(f"note: the engine link does not resolve on disk; using the bundled engine ({engine_dir})")
+    css = inline_css(read_text(os.path.join(engine_dir, "deck.css")), engine_dir, not args.no_fonts)
+    js = read_text(os.path.join(engine_dir, "deck.js"))
+    if not CSS_RE.search(page) or not JS_RE.search(page):
+        raise PdError("deck.css / deck.js links not found in the deck")
+    page = CSS_RE.sub(lambda m: "<style>\n" + css + "\n</style>", page, count=1)
+    page = JS_RE.sub("", page, count=1)
+    used = set(re.findall(r'href="[^"]*icons\.svg#([\w-]+)"', page))
+    page = re.sub(r'href="[^"]*icons\.svg#([\w-]+)"', r'href="#dkicon-\1"', page)
+    # Icons built in JavaScript from a string literal ending in "icons.svg#": point it at the inline sprite, include all.
+    page, dynamic = re.subn(r'(["\'])[^"\'\s]*icons\.svg#\1', r'\1#dkicon-\1', page)
+    if dynamic:
+        used |= set(re.findall(r'<symbol id="([\w-]+)"', read_text(os.path.join(engine_dir, "icons.svg"))))
+    page = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + "\n" + sprite(engine_dir, used), page, count=1)
+    if "icons.svg" in page:
+        print("warning: 'icons.svg' still appears (e.g. a template string); those icons will not show in the single file. "
+              "Build icon URLs from a plain string literal ending in 'icons.svg#'.")
+    page = page.replace("</body>", "<script>\n" + js + "\n</script>\n</body>", 1)
+    page, n_img, missing = inline_images(page, os.path.dirname(deck))
+    for m in missing:
+        print(f"warning: image not found, left as a link: {m}")
+    if args.out:
+        out = os.path.abspath(os.path.expanduser(args.out))
+    else:
+        name = p.slug if p else os.path.basename(os.path.dirname(deck))
+        out = os.path.join(os.path.dirname(deck), "dist", name + ".html")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    write_text(out, page)
+    rel = sorted(set(re.findall(r'(?:href|src)="(/[^/"][^"]*)"', page)))
+    kb = os.path.getsize(out) / 1024
+    print(f"Wrote {out} ({kb:.0f} KB; {len(used)} icons inlined{' (all, for icons built in JS)' if dynamic else ''}; "
+          f"{n_img} images embedded; fonts {'dropped' if args.no_fonts else 'embedded'})")
+    if rel:
+        print("note: root-relative links remain and will not work outside the original site: " + ", ".join(rel[:6])
+              + (" …" if len(rel) > 6 else ""))
+    print(f"Check it like the deck: pairdeck qa \"{out}\"")
+    return 0
+
+
+# ------------------------------------------------------------------------------------ card: a share image
+
+def _plain(fragment: str) -> str:
+    fragment = re.sub(r"<br\s*/?>", " ", fragment)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", htmlmod.unescape(fragment))).strip()
+
+
+def cmd_card(args) -> int:
+    deck_path, p = resolve_deck(args.deck)
+    deck = str(deck_path)
+    s = read_text(deck)
+    engine_dir, _ = find_engine(deck, s)
+    fonts = Path(engine_dir or ENGINE, "fonts").as_uri() + "/"
+    if '<section class="dk-slide"' not in s:
+        raise PdError("no <section class=\"dk-slide\"> in the deck")
+    first = s[s.index('<section class="dk-slide"'):]
+    first = first[: first.index("</section>")]
+    m = re.search(r'<h1[^>]*class="[^"]*dk-h[^"]*"[^>]*>(.*?)</h1>', first, re.S)
+    if not m:
+        raise PdError("no <h1 class=\"dk-h\"> on the first slide")
+    title = _plain(m.group(1))
+    subs = [_plain(x) for x in re.findall(r'<p class="dk-sub"[^>]*>(.*?)</p>', first, re.S)]
+    sub = subs[-1] if subs else ""
+    meta = re.search(r'<p class="dk-meta"[^>]*>(.*?)</p>', first, re.S)
+    meta = _plain(meta.group(1)) if meta else ""
+    icon = f'<img src="{Path(args.icon).expanduser().resolve().as_uri()}">' if args.icon else ""
+    size = 56 if len(title) < 70 else 48
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><style>
+@font-face{{font-family:"CMU Serif";src:url("{fonts}cmunrm.woff")}}
+html,body{{margin:0}} body{{width:1200px;height:630px;background:#fff;font-family:"CMU Serif",Georgia,serif;color:#222;position:relative;overflow:hidden}}
+.k{{position:absolute;left:70px;top:54px;display:flex;align-items:center;gap:14px;font:600 20px/1 Inter,system-ui,sans-serif;letter-spacing:.14em;text-transform:uppercase;color:#8a8a8a}}
+.k img{{width:34px;height:34px}}
+.c{{position:absolute;left:70px;right:70px;top:150px}}
+h1{{margin:0;font-weight:400;font-size:{size}px;line-height:1.12}}
+.r{{width:70px;height:3px;background:#b8913a;margin:34px 0}}
+.s{{font-size:28px;line-height:1.35;color:#6b6b6b;max-width:980px}}
+.m{{position:absolute;left:70px;right:70px;bottom:52px;display:flex;justify-content:space-between;gap:24px;font:400 19px/1.3 Inter,system-ui,sans-serif;color:#8a8a8a}}
+.m span{{max-width:840px}} .m b{{color:#6b5a9e;font-weight:600;align-self:flex-end}}
+</style></head><body>
+<div class="k">{icon}{htmlmod.escape(args.kicker)}</div>
+<div class="c"><h1>{htmlmod.escape(title)}</h1><div class="r"></div><div class="s">{htmlmod.escape(sub)}</div></div>
+<div class="m"><span>{htmlmod.escape(meta)}</span><b>{htmlmod.escape(args.site)}</b></div>
+</body></html>"""
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as f:
+        f.write(page)
+    out = os.path.abspath(os.path.expanduser(args.out)) if args.out else os.path.join(os.path.dirname(deck), "card.png")
+    try:
+        run_chrome([find_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
+                    "--virtual-time-budget=3000", "--window-size=1200,630", f"--screenshot={out}", Path(f.name).as_uri()],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    finally:
+        os.unlink(f.name)
+    print(out)
+    return 0
+
+
+# ------------------------------------------------------------------------------------ snapshots and the author's edits
+
+def take_snapshot(p: Project, st: dict, by: str, note: str = "") -> str:
+    """Copy the deck's text files into snapshots/NNNN and make it the base the watcher compares with.
+    by: "agent" (what the agent made), "author" (the author's version, seen by the watcher or registered as is)."""
+    p.snaps.mkdir(parents=True, exist_ok=True)
+    nums = [int(d.name) for d in p.snaps.iterdir() if d.name.isdigit()]
+    sid = f"{(max(nums) + 1) if nums else 1:04d}"
+    d = p.snaps / sid
+    files = {}
+    for rel, text in p.contents().items():
+        dest = d / "files" / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        files[rel] = sha1(text)
+    write_json(d / "meta.json", {"id": sid, "by": by, "time": now_iso(), "ts": time.time(), "note": note, "files": files})
+    st["base"] = sid
+    if by == "agent":
+        st["agent_snaps"] = (st.get("agent_snaps") or []) + [sid]
+    prune_snapshots(p, st)
+    return sid
+
+
+def prune_snapshots(p: Project, st: dict, keep: int = 30) -> None:
+    keepers = {st.get("base")} | set((st.get("agent_snaps") or [])[-2:])
+    ids = sorted(d.name for d in p.snaps.iterdir() if d.name.isdigit())
+    for sid in ids[:-keep]:
+        if sid not in keepers:
+            shutil.rmtree(p.snaps / sid, ignore_errors=True)
+    st["agent_snaps"] = [s for s in (st.get("agent_snaps") or []) if (p.snaps / s).exists()]
+
+
+def snapshot_meta(p: Project, sid: str | None) -> dict | None:
+    if not sid:
+        return None
+    try:
+        return json.loads((p.snaps / sid / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def snapshot_files(p: Project, sid: str | None) -> dict:
+    meta = snapshot_meta(p, sid)
+    if not meta:
+        return {}
+    out = {}
+    for rel in meta["files"]:
+        f = p.snaps / sid / "files" / rel
+        if f.exists():
+            out[rel] = read_text(f)
+    return out
+
+
+def norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+SECTION_OPEN = re.compile(r"<section\b[^>]*>", re.I)
+SECTION_ANY = re.compile(r"<(/?)section\b[^>]*>", re.I)
+
+
+def split_regions(rel: str, text: str) -> list[dict]:
+    """A deck file as regions: for HTML, the page head, one region per top-level <section> (a slide), the page end;
+    for any other file, the whole file. Each region: key, name, text, slide (1-based or None), label, title."""
+    if not rel.lower().endswith((".html", ".htm")):
+        return [{"key": f"{rel}::file", "name": rel, "text": text, "slide": None, "label": "", "title": "",
+                 "region": "file", "file": rel}]
+    spans, depth, start = [], 0, None
+    for m in SECTION_ANY.finditer(text):
+        if not m.group(1):
+            if depth == 0:
+                start = m.start()
+            depth += 1
+        else:
+            depth = max(0, depth - 1)
+            if depth == 0 and start is not None:
+                spans.append((start, m.end()))
+                start = None
+    out = []
+    head_end = spans[0][0] if spans else len(text)
+    out.append({"key": f"{rel}::head", "name": f"{rel}: page head (title, styles)", "text": text[:head_end],
+                "slide": None, "label": "", "title": "", "region": "head", "file": rel})
+    for n, (a, b) in enumerate(spans, 1):
+        body = text[a:b]
+        tag = SECTION_OPEN.match(body).group(0)
+        label = re.search(r'data-label="([^"]*)"', tag)
+        h = re.search(r"<h[12][^>]*>(.*?)</h[12]>", body, re.S | re.I)
+        title = norm(re.sub(r"<[^>]+>", " ", htmlmod.unescape(h.group(1)))) if h else ""
+        out.append({"key": f"{rel}::slide", "name": f"slide {n}", "text": body, "slide": n,
+                    "label": htmlmod.unescape(label.group(1)) if label else "", "title": title, "region": "slide",
+                    "file": rel})
+    if spans:
+        out.append({"key": f"{rel}::end", "name": f"{rel}: page end (navigation, scripts)", "text": text[spans[-1][1]:],
+                    "slide": None, "label": "", "title": "", "region": "end", "file": rel})
+    return out
+
+
+def region_hashes(files: dict) -> set:
+    return {sha1(norm(r["text"])) for rel, text in files.items() for r in split_regions(rel, text)}
+
+
+def pair_regions(old: list[dict], new: list[dict]) -> list[tuple]:
+    """Match the regions of two versions of a file: (old, new) pairs, with None for added or deleted regions."""
+    a = [r["key"] + "|" + sha1(norm(r["text"])) for r in old]
+    b = [r["key"] + "|" + sha1(norm(r["text"])) for r in new]
+    pairs = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            continue
+        olds, news = list(range(i1, i2)), list(range(j1, j2))
+        while olds and news:  # pair by similarity, best first
+            best = max(((o, n) for o in olds for n in news if old[o]["key"] == new[n]["key"]),
+                       key=lambda on: difflib.SequenceMatcher(None, norm(old[on[0]]["text"])[:3000],
+                                                              norm(new[on[1]]["text"])[:3000]).quick_ratio(),
+                       default=None)
+            if best is None:
+                break
+            pairs.append((old[best[0]], new[best[1]]))
+            olds.remove(best[0])
+            news.remove(best[1])
+        pairs += [(old[o], None) for o in olds] + [(None, new[n]) for n in news]
+    return pairs
+
+
+def unified(a: str, b: str, name: str, n: int = 2) -> str:
+    lines = difflib.unified_diff(a.splitlines(), b.splitlines(), fromfile=f"agent/{name}", tofile=f"author/{name}",
+                                 n=n, lineterm="")
+    return "\n".join(lines)
+
+
+def edit_events(p: Project, st: dict) -> list[dict]:
+    """Compare the deck now with the base snapshot. Each changed region becomes one event:
+    revised (the author rewrote what the agent made), reverted (the author restored what the agent had changed),
+    own_edit (the author changed their own part, or added something new)."""
+    base = st.get("base")
+    old_files, new_files = snapshot_files(p, base), p.contents()
+    if old_files == new_files:
+        return []
+    agents = st.get("agent_snaps") or []
+    last = region_hashes(snapshot_files(p, agents[-1])) if agents else set()
+    prev = region_hashes(snapshot_files(p, agents[-2])) if len(agents) > 1 else set()
+    events = []
+    for rel in sorted(set(old_files) | set(new_files)):
+        a, b = old_files.get(rel), new_files.get(rel)
+        if a == b:
+            continue
+        olds = split_regions(rel, a) if a is not None else []
+        news = split_regions(rel, b) if b is not None else []
+        for o, n in pair_regions(olds, news):
+            ho = sha1(norm(o["text"])) if o else None
+            hn = sha1(norm(n["text"])) if n else None
+            if ho == hn:
+                continue
+            if o and n:
+                if ho in last and hn in prev and hn not in last:
+                    kind = "reverted"
+                elif ho in last:
+                    kind = "revised"
+                else:
+                    kind = "own_edit"
+                change = "changed"
+            elif n:  # a region only in the author's version
+                kind = "reverted" if (hn in prev and hn not in last) else "own_edit"
+                change = "added"
+            else:  # a region the author deleted
+                kind = "reverted" if (ho in last and prev and ho not in prev) else "revised" if ho in last else "own_edit"
+                change = "deleted"
+            r = n or o
+            name = r["name"] if r["region"] != "slide" else \
+                f"slide {r['slide']}" + (f" ({r['label']})" if r["label"] else "") + (f" \"{r['title']}\"" if r["title"] else "")
+            events.append({
+                "kind": kind, "project": p.slug, "file": rel, "region": r["region"], "slide": r["slide"],
+                "label": r["label"], "title": r["title"], "where": name, "change": change, "snapshot": base,
+                "before": clip(o["text"] if o else "", 3000), "after": clip(n["text"] if n else "", 3000),
+                "diff": clip(unified(o["text"] if o else "", n["text"] if n else "", rel), 6000),
+            })
+    return events
+
+
+def agent_work_since_base(p: Project, st: dict) -> bool:
+    """Replies written after the base snapshot, while the deck differs from it: the agent answered comments and edited the
+    deck but did not snapshot. Watching now would count its edits as the author's."""
+    meta = snapshot_meta(p, st.get("base"))
+    if not meta:
+        return False
+    replies = [c for c in read_comment_log(p) if c.get("type") == "reply" and c.get("ts", 0) > meta.get("ts", 0)]
+    return bool(replies) and snapshot_files(p, st.get("base")) != p.contents()
+
+
+def cmd_snapshot(args) -> int:
+    p = Project(args.slug)
+    ensure_not_watching(p, "A snapshot")
+    if not p.deck.exists():
+        raise PdError(f"{p.deck} does not exist", EXIT_MISSING)
+    st = load_state(p)
+    before = snapshot_files(p, st.get("base"))
+    sid = take_snapshot(p, st, "agent", args.message or "")
+    save_state(p, st)
+    now = p.contents()
+    changed = sorted(rel for rel in set(before) | set(now) if before.get(rel) != now.get(rel))
+    print(f"snapshot {sid} of {p.slug}: {len(now)} file(s)" + (f"; changed since the last one: {', '.join(changed)}"
+                                                                 if before and changed else ""))
+    print("The author's edits from now on are compared with this version.")
+    return 0
+
+
+# ------------------------------------------------------------------------------------ comments
+
+# comments.jsonl holds one record per line:
+#   {"type": "comment", "id": "c3", "ts", "time", "author", "slide", "slide_id", "label", "title", "step", "steps",
+#    "box": {"x", "y", "w", "h"} (fractions of the slide's content area) or null, "under", "text", "parent"}
+#   {"type": "reply", "id": "c3", "ts", "time", "agent", "text"}       written by `pairdeck resolve`
+#   {"type": "keep", "id": "c3", "ts", "time"}                         the author pressed Keep on the review page
+
+def read_comment_log(p: Project) -> list[dict]:
+    if not p.comments_path.exists():
+        return []
+    out = []
+    for line in read_text(p.comments_path).splitlines():
+        if line.strip():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    return out
+
+
+def append_comment_log(p: Project, rec: dict) -> dict:
+    with Locked(p.dir / ".comments.lock"):
+        if rec.get("type") == "comment" and not rec.get("id"):
+            n = 0
+            for r in read_comment_log(p):
+                m = re.fullmatch(r"c(\d+)", str(r.get("id", "")))
+                if m:
+                    n = max(n, int(m.group(1)))
+            rec["id"] = f"c{n + 1}"
+        rec.setdefault("ts", time.time())
+        rec.setdefault("time", now_iso())
+        with open(p.comments_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
+
+
+def comment_threads(p: Project, sent: set | None = None) -> list[dict]:
+    """Comments with their replies and status: waiting (not yet in a batch), with the agent, answered, kept."""
+    comments, by_id = [], {}
+    for r in read_comment_log(p):
+        t = r.get("type")
+        if t == "comment":
+            c = dict(r, replies=[], kept=False)
+            comments.append(c)
+            by_id[c["id"]] = c
+        elif t == "reply" and r.get("id") in by_id:
+            by_id[r["id"]]["replies"].append({"text": r.get("text", ""), "time": r.get("time"), "agent": r.get("agent")})
+        elif t == "keep" and r.get("id") in by_id:
+            by_id[r["id"]]["kept"] = True
+    for c in comments:
+        c["status"] = "kept" if c["kept"] else "answered" if c["replies"] else \
+            "with the agent" if sent is not None and c["id"] in sent else "waiting"
+    return comments
+
+
+GENERAL = re.compile(r"\b(always|never|every (?:time|slide|deck)|all (?:slides|decks)|everywhere|in general|from now on|"
+                     r"by default|as a rule|don'?t ever|do not ever|in future|in every)\b|以后|总是|永远|不要再|每次|所有的?(?:slide|幻灯片|页)",
+                     re.I)
+
+
+def describe_box(c: dict) -> str:
+    b = c.get("box")
+    if not b:
+        return "the whole slide"
+    return (f"x {b['x']:.2f}–{b['x'] + b['w']:.2f}, y {b['y']:.2f}–{b['y'] + b['h']:.2f} "
+            f"(fractions of the slide's content area)")
+
+
+def comment_events(p: Project, threads: list[dict], batch: list[dict]) -> list[dict]:
+    """Evidence from comments: `stated` for a comment in this batch that states a general preference, `kept` for every
+    answer the author pressed Keep on. Each fact is recorded once (the `source` key)."""
+    events = []
+    for c in batch:
+        if GENERAL.search(c.get("text", "")):
+            events.append({"kind": "stated", "project": p.slug, "cid": c["id"], "comment": c["text"],
+                           "slide": c.get("slide"), "label": c.get("label", ""), "title": c.get("title", ""),
+                           "source": f"{p.slug}:stated:{c['id']}", "how": "the comment's words read as general"})
+    for c in threads:
+        if c["kept"]:
+            events.append({"kind": "kept", "project": p.slug, "cid": c["id"], "comment": c["text"],
+                           "reply": c["replies"][-1]["text"] if c["replies"] else "", "slide": c.get("slide"),
+                           "label": c.get("label", ""), "title": c.get("title", ""), "source": f"{p.slug}:kept:{c['id']}"})
+    return events
+
+
+# ------------------------------------------------------------------------------------ review server
+
+def overlay_tags(p: Project) -> str:
+    cfg = {"slug": p.slug, "title": p.title, "author": HANDLE, "agent": AGENT, "version": VERSION}
+    return ('<link rel="stylesheet" href="/__pairdeck/overlay.css">\n'
+            f'<script>window.PAIRDECK = {json.dumps(cfg)};</script>\n'
+            '<script defer src="/__pairdeck/overlay.js"></script>\n')
+
+
+def deck_sig(p: Project) -> str:
+    return sha1(json.dumps(p.signature(), sort_keys=True))
+
+
+def make_handler(p: Project, root: Path, deck_url: str, port_box: list):
+    allowed_hosts = lambda: {f"127.0.0.1:{port_box[0]}", f"localhost:{port_box[0]}"}  # noqa: E731
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(root), **kw)
+
+        def log_message(self, *args):
+            pass
+
+        def _host_ok(self) -> bool:
+            return self.headers.get("Host", "") in allowed_hosts()
+
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, code: int, obj) -> None:
+            self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+        def do_GET(self):
+            if not self._host_ok():
+                return self._json(403, {"error": "unknown host"})
+            path = urllib.parse.urlsplit(self.path).path
+            if path in ("/", ""):
+                self.send_response(302)
+                self.send_header("Location", deck_url)
+                self.end_headers()
+                return
+            if path.startswith("/__pairdeck/"):
+                name = path[len("/__pairdeck/"):]
+                if name == "state":
+                    st = load_state(p)
+                    return self._json(200, {"slug": p.slug, "sig": deck_sig(p),
+                                            "comments": comment_threads(p, set(st.get("sent", [])))})
+                if name in ("overlay.js", "overlay.css"):
+                    ctype = "text/javascript" if name.endswith(".js") else "text/css"
+                    return self._send(200, (REVIEW_ASSETS / name).read_bytes(), ctype + "; charset=utf-8")
+                return self._json(404, {"error": "not found"})
+            local = Path(self.translate_path(self.path))
+            try:
+                local.resolve().relative_to(root.resolve())
+            except ValueError:
+                return self._json(404, {"error": "not found"})
+            if local.is_file() and local.suffix.lower() in (".html", ".htm"):
+                page = read_text(local)
+                tags = overlay_tags(p)
+                page = page.replace("</body>", tags + "</body>", 1) if "</body>" in page else page + tags
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            return super().do_GET()
+
+        def do_POST(self):
+            if not self._host_ok():
+                return self._json(403, {"error": "unknown host"})
+            origin = self.headers.get("Origin")
+            if origin and origin.replace("http://", "") not in allowed_hosts():
+                return self._json(403, {"error": "cross-origin request"})
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                return self._json(415, {"error": "send application/json"})
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > 200_000:
+                return self._json(413, {"error": "too large"})
+            try:
+                body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+            except ValueError:
+                return self._json(400, {"error": "not JSON"})
+            path = urllib.parse.urlsplit(self.path).path
+            known = {c["id"] for c in comment_threads(p)}
+            if path == "/__pairdeck/comments":
+                text = str(body.get("text", "")).strip()
+                if not text or len(text) > 5000:
+                    return self._json(400, {"error": "a comment needs text (at most 5000 characters)"})
+                box = body.get("box")
+                if box is not None:
+                    try:
+                        box = {k: round(float(box[k]), 4) for k in ("x", "y", "w", "h")}
+                    except (KeyError, TypeError, ValueError):
+                        return self._json(400, {"error": "box needs numbers x, y, w, h"})
+                    if not all(-1 <= v <= 2 for v in box.values()) or box["w"] <= 0 or box["h"] <= 0:
+                        return self._json(400, {"error": "box out of range"})
+                anchor = body.get("anchor")
+                if anchor is not None:
+                    try:
+                        anchor = {"i": int(anchor["i"]), **{k: round(float(anchor[k]), 4) for k in ("x", "y", "w", "h")}}
+                    except (KeyError, TypeError, ValueError):
+                        return self._json(400, {"error": "anchor needs i, x, y, w, h"})
+                    if not (0 <= anchor["i"] < 500 and all(-5 <= anchor[k] <= 5 for k in "xywh")):
+                        return self._json(400, {"error": "anchor out of range"})
+                parent = body.get("parent")
+                if parent is not None and parent not in known:
+                    return self._json(400, {"error": f"unknown comment {parent}"})
+
+                def num(k, d=0):
+                    try:
+                        return int(body.get(k, d))
+                    except (TypeError, ValueError):
+                        return d
+                rec = {"type": "comment", "author": HANDLE, "slide": max(1, num("slide", 1)),
+                       "slide_id": str(body.get("slide_id", ""))[:120], "label": str(body.get("label", ""))[:120],
+                       "title": str(body.get("title", ""))[:300], "step": max(0, num("step")), "steps": max(0, num("steps")),
+                       "box": box, "anchor": anchor, "under": str(body.get("under", ""))[:400], "text": text,
+                       "parent": parent,
+                       "viewport": body.get("viewport") if isinstance(body.get("viewport"), list) else None}
+                return self._json(200, append_comment_log(p, rec))
+            if path == "/__pairdeck/keep":
+                cid = body.get("id")
+                if cid not in known:
+                    return self._json(400, {"error": f"unknown comment {cid}"})
+                return self._json(200, append_comment_log(p, {"type": "keep", "id": cid}))
+            return self._json(404, {"error": "not found"})
+
+    return Handler
+
+
+def cmd_review(args) -> int:
+    p = Project(args.slug)
+    if not p.deck.exists():
+        raise PdError(f"{p.deck} does not exist", EXIT_MISSING)
+    other = p.server()
+    if other and other.get("pid") != os.getpid():
+        print(f"a review server for {p.slug} is already running: {other['url']} (pid {other['pid']})")
+        return 0
+    page = read_text(p.deck)
+    engine_dir, root = find_engine(str(p.deck), page)
+    root = Path(root or p.deck_dir)
+    port = args.port if args.port is not None else int(p.cfg.get("port") or 0)
+    port_box = [port]
+    deck_url = "/" + p.deck.resolve().relative_to(root.resolve()).as_posix()
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(p, root, deck_url, port_box))
+    except OSError as exc:
+        raise PdError(f"cannot listen on 127.0.0.1:{port} ({exc}); pass --port N (0 picks a free one)")
+    port_box[0] = srv.server_address[1]
+    url = f"http://127.0.0.1:{port_box[0]}{deck_url}"
+    write_json(p.server_path, {"pid": os.getpid(), "port": port_box[0], "url": url, "started": now_iso()})
+
+    def release(*_):
+        try:
+            if json.loads(p.server_path.read_text()).get("pid") == os.getpid():
+                p.server_path.unlink()
+        except (OSError, ValueError):
+            pass
+    atexit.register(release)
+    signal.signal(signal.SIGTERM, lambda *_: (release(), sys.exit(0)))
+    if engine_dir is None:
+        print("note: the deck's engine link does not resolve on disk; the page may load without its styles")
+    print(f"review page for {p.slug}: {url}", flush=True)
+    print("Comment button (or the c key): drag a box on the slide, type, Send. Replies appear under each comment.",
+          flush=True)
+    if args.open:
+        import webbrowser
+        webbrowser.open(url)
+    try:
+        srv.serve_forever(poll_interval=0.3)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        release()
+    return 0
+
+
+# ------------------------------------------------------------------------------------ watch, resolve
+
+def render_event_line(e: dict) -> str:
+    k = e.get("kind")
+    if k in ("revised", "reverted", "own_edit"):
+        what = {"revised": f"{HANDLE} revised the agent's", "reverted": f"{HANDLE} reverted the agent's change to",
+                "own_edit": f"{HANDLE}'s own edit of"}[k]
+        return f"- {e['id']} · {k} · {what} {e.get('where', e.get('file', ''))} ({e.get('change', '')})"
+    if k == "stated":
+        return f"- {e['id']} · stated · {e.get('cid')}: \"{clip(e.get('comment', ''), 160)}\""
+    if k == "kept":
+        return f"- {e['id']} · kept · {e.get('cid')}: \"{clip(e.get('comment', ''), 90)}\" → \"{clip(e.get('reply', ''), 90)}\""
+    if k == "seed":
+        return f"- {e['id']} · seed {e.get('seed')} · {e.get('file', '')}"
+    return f"- {e['id']} · {k}"
+
+
+def render_comment(p: Project, c: dict, threads: dict, review_url: str | None) -> str:
+    where = f"slide {c['slide']}" + (f" ({c['label']})" if c.get("label") else "") + \
+        (f" \"{c['title']}\"" if c.get("title") else "")
+    steps = f" · build step {c.get('step', 0)} of {c.get('steps', 0)}" if c.get("steps") else ""
+    out = [f"## {c['id']} · {where}{steps}"]
+    if c.get("parent") and c["parent"] in threads:
+        par = threads[c["parent"]]
+        out.append(f"Follow-up to {par['id']}: \"{clip(par['text'], 200)}\"" +
+                   (f" → your reply: \"{clip(par['replies'][-1]['text'], 200)}\"" if par["replies"] else ""))
+    out.append(f"Box: {describe_box(c)}" + (f" · under it: \"{clip(c['under'], 240)}\"" if c.get("under") else ""))
+    if c.get("author") and c["author"] != HANDLE:
+        out.append(f"From: {c['author']}")
+    out.append("")
+    out += ["> " + ln for ln in c["text"].splitlines()]
+    if review_url:
+        out += ["", f"See it: {review_url}?comment={c['id']}#{c['slide']}"]
+    return "\n".join(out)
+
+
+def emit_batch(p: Project, st: dict, fresh: list[dict], edits: list[dict], base_before: str | None) -> str:
+    threads = comment_threads(p, set(st.get("sent", [])))
+    by_id = {c["id"]: c for c in threads}
+    append_events(comment_events(p, threads, fresh))
+    pending = pending_events(p.slug)
+    srv = p.server()
+    review_url = srv["url"] if srv else None
+    parts = []
+    if fresh:
+        parts.append(f"{len(fresh)} comment{'s' if len(fresh) != 1 else ''}")
+    if edits:
+        parts.append(f"{len(edits)} edit{'s' if len(edits) != 1 else ''} by {HANDLE}")
+    meta = snapshot_meta(p, base_before)
+    out = [f"# PairDeck · {p.slug} · {' · '.join(parts) or 'style evidence'} · {now_iso()}", "",
+           f"Deck: {p.deck}" + (f" · review page: {review_url}" if review_url else " · review page: not running "
+                                                                                  f"(`pairdeck review {p.slug}`)"),
+           f"Compared with snapshot {base_before or '(none)'}" + (f" ({meta['by']}, {meta['time']})" if meta else ""),
+           f"Style guide: {style_summary()} · deck notes: {p.dir / 'NOTES.md'}", ""]
+    for c in fresh:
+        out += [render_comment(p, by_id.get(c["id"], c), by_id, review_url), ""]
+    open_old = [c["id"] for c in threads if c["status"] == "with the agent" and c["id"] not in {x["id"] for x in fresh}]
+    if open_old:
+        out += [f"Still unanswered from an earlier batch: {', '.join(open_old)}.", ""]
+    if edits:
+        out += [f"## Edits by {HANDLE} since snapshot {base_before}", ""]
+        for e in edits:
+            out += [f"### {e['id']} · {e['kind']} · {e['file']} · {e['where']} ({e['change']})", "", "```diff",
+                    clip(e["diff"], 2500), "```", ""]
+    rest = [e for e in pending if e["id"] not in {x["id"] for x in edits}]
+    if rest:
+        out += [f"## Style evidence not yet learned ({len(rest)})", ""]
+        out += [render_event_line(e) for e in rest[:40]]
+        if len(rest) > 40:
+            out.append(f"- … and {len(rest) - 40} more (`pairdeck learn {p.slug}`)")
+        out.append("")
+    ids = " ".join(c["id"] for c in fresh) or "(none)"
+    out += ["## Next", "",
+            f"1. Read the style guide if its sha changed, and the deck notes. Comments: {ids}.",
+            f"2. Edit the deck in {p.deck_dir}. After each comment: `pairdeck resolve {p.slug} <id> \"reply\"`.",
+            f"3. QA the slides you changed: `pairdeck qa {p.slug} --slides N,M`, and look at the screenshots.",
+            f"4. `pairdeck snapshot {p.slug}` (the author's next edits are compared with it).",
+            f"5. Learn: `pairdeck learn {p.slug}`, update STYLE.md, `pairdeck learn {p.slug} --ack <E-ids>`, commit the vault.",
+            f"6. Start `pairdeck watch {p.slug}` again in the background, and report in two to four lines."]
+    text = "\n".join(out) + "\n"
+    batches = p.dir / "batches"
+    batches.mkdir(exist_ok=True)
+    (batches / (dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".md")).write_text(text, encoding="utf-8")
+    return text
+
+
+def collect_edits(p: Project, st: dict) -> tuple[list[dict], str | None]:
+    """The author's edits since the base snapshot, as evidence; the deck as it is now becomes the base."""
+    base_before = st.get("base")
+    events = edit_events(p, st)
+    if events:
+        ids = append_events(events)
+        for e, i in zip(events, ids):
+            e["id"] = i
+        take_snapshot(p, st, "author", "the author's edits, seen by the watcher")
+    return events, base_before
+
+
+def cmd_watch(args) -> int:
+    p = Project(args.slug)
+    if not p.deck.exists():
+        raise PdError(f"{p.deck} does not exist (moved? fix \"dir\" in {p.dir / 'project.json'})", EXIT_MISSING)
+    acquire_lock(p, args.takeover)
+    st = load_state(p)
+    if not st.get("base"):
+        sid = take_snapshot(p, st, "author", "baseline taken by watch: no snapshot yet")
+        save_state(p, st)
+        print(f"note: no snapshot of {p.slug} yet; took {sid} as the baseline. After building or changing the deck, run "
+              f"`pairdeck snapshot {p.slug}` so the author's edits are compared with the agent's version.",
+              file=sys.stderr, flush=True)
+    if agent_work_since_base(p, st) and not args.edits_are_author:
+        raise PdError(f"the deck changed since snapshot {st['base']} and comments were answered since: run "
+                      f"`pairdeck snapshot {p.slug}` first, so your edits are not read as the author's "
+                      f"(or pass --edits-are-author if the author made them)", EXIT_UNSNAPPED)
+    srv = p.server()
+    print(f"watching {p.slug}: comments from the review page" + (f" ({srv['url']})" if srv else
+          f" (not running: `pairdeck review {p.slug}`)") + f" and edits to {p.deck_dir}; a batch is sent "
+          f"{args.settle:g}s after the last change.", file=sys.stderr, flush=True)
+    sig = p.signature()
+    base_files = snapshot_files(p, st.get("base"))
+    edits_seen = base_files != p.contents()
+    changed_at = time.time() if edits_seen else 0.0
+    started = time.time()
+    while True:
+        t = time.time()
+        sent = set(st.get("sent", []))
+        fresh = [r for r in read_comment_log(p) if r.get("type") == "comment" and r["id"] not in sent]
+        newest = max((r.get("ts", 0) for r in fresh), default=0)
+        now_sig = p.signature()
+        if now_sig != sig:
+            sig = now_sig
+            changed_at = t
+            edits_seen = snapshot_files(p, st.get("base")) != p.contents()
+        quiet = t - max(newest, changed_at) >= args.settle
+        if (fresh or edits_seen) and quiet:
+            edits, base_before = collect_edits(p, st) if edits_seen else ([], st.get("base"))
+            if fresh or edits:
+                st["sent"] = sorted(sent | {r["id"] for r in fresh}, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+                st["batches"] = st.get("batches", 0) + 1
+                text = emit_batch(p, st, fresh, edits, base_before)
+                save_state(p, st)
+                sys.stdout.write(text)
+                return EXIT_BATCH
+            edits_seen = False  # touched but unchanged (saved without edits)
+        if args.once:
+            save_state(p, st)
+            waiting = len(fresh) + (1 if edits_seen else 0)
+            print(f"nothing ready in {p.slug}" + (f" ({waiting} item(s) still settling)" if waiting else ""))
+            return EXIT_NOTHING
+        if args.max_hours and t - started > args.max_hours * 3600:
+            save_state(p, st)
+            print(f"pairdeck: watched {p.slug} for {args.max_hours:g} h without feedback; stopped.")
+            return EXIT_NOTHING
+        time.sleep(args.interval)
+
+
+def cmd_resolve(args) -> int:
+    p = Project(args.slug)
+    reply = read_text(args.reply_file) if args.reply_file else args.reply
+    if not reply or not reply.strip():
+        raise PdError("give the reply: pairdeck resolve SLUG ID \"reply\" (or --reply-file FILE)")
+    threads = {c["id"]: c for c in comment_threads(p)}
+    cid = args.cid if args.cid.startswith("c") else "c" + args.cid
+    if cid not in threads:
+        raise PdError(f"no comment {cid} in {p.slug} (known: {', '.join(threads) or 'none'})")
+    append_comment_log(p, {"type": "reply", "id": cid, "agent": AGENT, "text": reply.strip()})
+    if args.stated:
+        c = threads[cid]
+        ids = append_events([{"kind": "stated", "project": p.slug, "cid": cid, "comment": c["text"],
+                              "slide": c.get("slide"), "label": c.get("label", ""), "title": c.get("title", ""),
+                              "source": f"{p.slug}:stated:{cid}", "how": "marked by the agent with resolve --stated"}])
+        print(f"recorded {cid} as a stated preference: {', '.join(ids) or 'already recorded'}")
+    srv = p.server()
+    print(f"{cid} answered" + (f"; the review page shows the reply ({srv['url']}?comment={cid})" if srv else ""))
+    return 0
+
+
+# ------------------------------------------------------------------------------------ learn
+
+def print_event(e: dict) -> None:
+    head = f"### {e['id']} · {e['kind']} · {e.get('project') or 'seed'}"
+    if e.get("where"):
+        head += f" · {e['where']}"
+    elif e.get("slide"):
+        head += f" · slide {e['slide']}" + (f" ({e['label']})" if e.get("label") else "")
+    print(head)
+    k = e["kind"]
+    if k in ("revised", "reverted", "own_edit"):
+        print({"revised": f"{HANDLE} changed what the agent made ({e.get('change')}):",
+               "reverted": f"{HANDLE} restored the version from before the agent's change:",
+               "own_edit": f"{HANDLE}'s own edit ({e.get('change')}):"}[k])
+        print("```diff\n" + e.get("diff", "") + "\n```")
+    elif k == "stated":
+        print(f"Comment {e.get('cid')}: {e.get('comment')}")
+        print(f"(Recorded because {e.get('how', 'it reads as a general preference')}. If it is only about this slide, "
+              f"discard it.)")
+    elif k == "kept":
+        print(f"Comment {e.get('cid')}: {e.get('comment')}\nReply: {e.get('reply')}\n{HANDLE} kept the change as made.")
+    elif k == "seed":
+        print(f"Seed {e.get('seed')}: {e.get('file')} ({e.get('format')}, {e.get('pages')} slides or pages)"
+              + (f" · note: {e['note']}" if e.get("note") else ""))
+        if e.get("summary"):
+            print("Summary: " + json.dumps(e["summary"], ensure_ascii=False))
+        print(f"Read {SEEDS / str(e.get('seed'))}/samples.md, stats.json and pages/ (references/seeding.md).")
+    print()
+
+
+def cmd_learn(args) -> int:
+    if args.discard or args.ack:
+        if args.discard:
+            ids = {x.strip() for a in args.discard for x in a.split(",") if x.strip()}
+            if not args.why.strip():
+                raise PdError("say why with --why: discarded evidence keeps the reason")
+            n = mark_events(ids, "discarded", {"why": args.why.strip(), "date": now_iso()})
+            print(f"discarded {n} event(s)")
+        if args.ack:
+            ids = {x.strip() for a in args.ack for x in a.split(",") if x.strip()}
+            n = mark_events(ids, "acked", {"date": now_iso()})
+            print(f"acknowledged {n} event(s)")
+        left = pending_events(args.slug, every=args.all or not args.slug)
+        print(f"{len(left)} still pending" + (f" in {args.slug}" if args.slug and not args.all else ""))
+        return 0
+    if not args.slug and not args.all:
+        raise PdError("name a deck (pairdeck learn SLUG) or pass --all")
+    slugs = project_slugs() if args.all else [args.slug]
+    for slug in slugs:  # pick up edits and Keep clicks the watcher has not seen (it is not running)
+        p = Project(slug)
+        if lock_owner(p) or args.no_sync or not p.deck.exists():
+            continue
+        st = load_state(p)
+        if st.get("base"):
+            collect_edits(p, st)
+            save_state(p, st)
+        append_events(comment_events(p, comment_threads(p, set(st.get("sent", []))), []))
+    events = pending_events(args.slug, every=args.all)
+    if not events:
+        print("no style evidence waiting")
+        return 0
+    if args.json:
+        print(json.dumps(events, indent=1, ensure_ascii=False))
+        return 0
+    for e in events:
+        print_event(e)
+    print(f"Distil these into {STYLE_MD} (references/learning.md), then: pairdeck learn --ack "
+          + " ".join(e["id"] for e in events))
+    return 0
+
+
+# ------------------------------------------------------------------------------------ seed
+
+def seed_ids() -> list[str]:
+    if not SEEDS.exists():
+        return []
+    return sorted(d.name for d in SEEDS.iterdir() if (d / "manifest.json").exists())
+
+
+def cmd_seed(args) -> int:
+    if args.list:
+        ids = seed_ids()
+        if not ids:
+            print("no seeds yet: pairdeck seed <your past decks: .pptx, .pdf, .html, or folders>")
+            return 0
+        events = evidence_rows()
+        for sid in ids:
+            man = json.loads((SEEDS / sid / "manifest.json").read_text(encoding="utf-8"))
+            mine = [e for e in events if e.get("kind") == "seed" and e.get("seed") == sid]
+            waiting = [e["id"] for e in mine if not e.get("acked") and not e.get("discarded")]
+            files = [f for f in man.get("files", []) if not f.get("skipped")]
+            print(f"{sid} · {man.get('created', '')[:10]} · {len(files)} file(s) · "
+                  + (f"waiting: {' '.join(waiting)}" if waiting else "learned")
+                  + (f" · note: {man['note']}" if man.get("note") else ""))
+            for f in files[:12]:
+                print(f"    {f.get('name')} ({f.get('format')}, {f.get('pages')} slides or pages)")
+        return 0
+    if args.forget:
+        sid = args.forget
+        if sid not in seed_ids():
+            raise PdError(f"no seed '{sid}' (pairdeck seed --list)")
+        ids = {e["id"] for e in evidence_rows() if e.get("kind") == "seed" and e.get("seed") == sid}
+        n = mark_events(ids, "discarded", {"why": "seed forgotten", "date": now_iso()}) if ids else 0
+        shutil.rmtree(SEEDS / sid)
+        print(f"forgot {sid}: removed its folder and discarded its {n} event(s). Entries in {STYLE_MD} whose only evidence "
+              f"was this seed should be removed by hand.")
+        return 0
+    if not args.paths:
+        raise PdError("give files or folders: pairdeck seed ~/talks/old-deck.pptx ~/talks/exports/ [--note \"…\"]")
+    if not SEED_SCRIPT.exists():
+        raise PdError(f"{SEED_SCRIPT} is missing (it ships with the PairLab repository)")
+    if not PROFILE_PATH.exists():
+        raise PdError("no profile yet: run `pairdeck setup --name \"Your Name\"` first")
+    SEEDS.mkdir(parents=True, exist_ok=True)
+    nums = [int(x.split("-")[1]) for x in seed_ids() if x.startswith("seed-") and x.split("-")[1].isdigit()]
+    sid = f"seed-{(max(nums) + 1) if nums else 1:03d}"
+    out = SEEDS / sid
+    cmd = [sys.executable, str(SEED_SCRIPT), *args.paths, "--out", str(out), "--kind", "deck", "--json",
+           "--max-pages", str(args.max_pages)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        shutil.rmtree(out, ignore_errors=True)
+        raise PdError(f"seed_visual.py failed:\n{r.stderr.strip() or r.stdout.strip()}")
+    try:
+        res = json.loads(r.stdout)
+    except ValueError:
+        shutil.rmtree(out, ignore_errors=True)
+        raise PdError(f"seed_visual.py printed no JSON:\n{r.stdout[:2000]}\n{r.stderr[:2000]}")
+    man_path = out / "manifest.json"
+    man = json.loads(man_path.read_text(encoding="utf-8"))
+    man["seed"] = sid
+    if args.note:
+        man["note"] = args.note
+    write_json(man_path, man)
+    files = [f for f in man.get("files", []) if not f.get("skipped")]
+    if not files:
+        shutil.rmtree(out, ignore_errors=True)
+        skipped = "; ".join(f"{f.get('name')}: {f.get('skipped')}" for f in man.get("files", []))
+        raise PdError("nothing to seed from" + (f" ({skipped})" if skipped else ""))
+    events = [{"kind": "seed", "project": None, "seed": sid, "file": f.get("name"), "path": f.get("file"),
+               "sha256": f.get("sha256"), "format": f.get("format"), "pages": f.get("pages"),
+               "summary": f.get("summary", {}), "note": args.note or ""} for f in files]
+    ids = append_events(events)
+    print(f"seed {sid}: {len(files)} file(s) read into {out}")
+    for line in res.get("summary_lines", []):
+        print("  " + line)
+    for f in man.get("files", []):
+        if f.get("skipped"):
+            print(f"  skipped {f.get('name')}: {f['skipped']}")
+    print(f"events: {', '.join(ids)}")
+    print(f"next: your agent reads {out / 'samples.md'}, stats.json and the page images, drafts entries in {STYLE_MD} "
+          f"(references/seeding.md), shows you the five to ten strongest, then runs: pairdeck learn --ack {' '.join(ids)}")
+    return 0
+
+
+# ------------------------------------------------------------------------------------ setup, paths, status
+
+HOME_GITIGNORE = """# PairDeck data home: working state stays local; project.json, NOTES.md, comments.jsonl and the vault are tracked
+projects/*/state.json
+projects/*/*.tmp
+projects/*/watch.lock
+projects/*/server.json
+projects/*/.comments.lock
+projects/*/batches/
+projects/*/snapshots/
+projects/*/qa/
+vault/.evidence.lock
+vault/*.tmp
+vault/seed/*/pages/
+.DS_Store
+"""
+
+
+def global_git(key: str) -> str:
+    try:
+        return git(Path.home(), "config", "--global", key, check=False).strip()
+    except (OSError, PdError):
+        return ""
+
+
+def from_template(template: str, dest: Path, **subs: str) -> None:
+    if dest.exists():
+        return
+    tpl = TEMPLATES / template
+    text = read_text(tpl) if tpl.exists() else ""
+    for k, v in subs.items():
+        text = text.replace("{" + k + "}", v)
+    dest.write_text(text, encoding="utf-8")
+
+
+def cmd_setup(args) -> int:
+    env_home = home_env()
+    home = Path(env_home).expanduser() if env_home else \
+        Path(args.home).expanduser().absolute() if args.home else DEFAULT_HOME
+    if home.resolve() == APP or APP in home.resolve().parents:
+        raise PdError(f"keep the data home outside the code folder {APP}: pass --home DIR")
+    if not env_home and home != DEFAULT_HOME:
+        if DEFAULT_HOME.exists() or DEFAULT_HOME.is_symlink():
+            if DEFAULT_HOME.resolve() != home.resolve():
+                raise PdError(f"{DEFAULT_HOME} already exists and points to {DEFAULT_HOME.resolve()}")
+        else:
+            home.mkdir(parents=True, exist_ok=True)
+            DEFAULT_HOME.symlink_to(home)
+    home.mkdir(parents=True, exist_ok=True)
+    prof_path = home / "profile.json"
+    prof = json.loads(prof_path.read_text(encoding="utf-8")) if prof_path.exists() else {}
+    name = args.name or prof.get("name") or global_git("user.name")
+    if not name:
+        raise PdError("give your name: pairdeck setup --name \"Ada Lovelace\"")
+    prof.update(name=name, handle=args.handle or prof.get("handle") or first_word(name))
+    prof["email"] = args.email or prof.get("email") or global_git("user.email")
+    if args.agent:
+        prof["agent"] = args.agent
+    prof.setdefault("agent", "Claude")
+    if args.language:
+        prof["language"] = args.language
+    prof_path.write_text(json.dumps(prof, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    vault = home / "vault"
+    (vault / "seed").mkdir(parents=True, exist_ok=True)
+    (home / "projects").mkdir(exist_ok=True)
+    from_template("STYLE.template.md", vault / "STYLE.md", name=name, handle=prof["handle"])
+    from_template("preferences.template.md", vault / "preferences.md", name=name, handle=prof["handle"])
+    (vault / "evidence.jsonl").touch()
+    if not args.no_git and not (home / ".git").exists() and shutil.which("git"):
+        (home / ".gitignore").write_text(HOME_GITIGNORE, encoding="utf-8")
+        (vault / "seed" / ".gitkeep").touch()
+        git(home, "init", "--quiet")
+        git(home, "add", "-A")
+        ident = ["-c", f"user.name={name}", "-c", f"user.email={prof['email'] or 'pairdeck@localhost'}"]
+        git(home, *ident, "commit", "--quiet", "-m", "PairDeck data home", check=False)
+    print(f"profile: {prof_path}\n  {name} (the review page says \"{prof['handle']}\"), agent {prof['agent']}\n"
+          f"style vault: {vault}\nprojects: {home / 'projects'}\n"
+          f"Next: pairdeck seed <your past decks> (optional), then pairdeck new <slug> --title \"…\"")
+    return 0
+
+
+def cmd_paths(args) -> int:
+    rows = [("code", f"{APP} (pairdeck {VERSION})"), ("data home", str(DATA)),
+            ("profile", f"{PROFILE_PATH}" + ("" if PROFILE_PATH.exists() else " (none yet: `pairdeck setup`)")),
+            ("style guide", str(STYLE_MD)), ("evidence", str(EVIDENCE)), ("seeds", str(SEEDS)),
+            ("loop preferences", str(VAULT / "preferences.md")), ("engine", str(ENGINE)),
+            ("projects", f"{PROJECTS}" + (": " + ", ".join(project_slugs()) if project_slugs() else ""))]
+    if args.json:
+        print(json.dumps(dict(rows), indent=1))
+    else:
+        for k, v in rows:
+            print(f"{k:>16}  {v}")
+    return 0
+
+
+def cmd_status(args) -> int:
+    if not args.slug:
+        print(f"data home: {DATA}" + ("" if PROFILE_PATH.exists() else " (no profile yet: `pairdeck setup`)"))
+        if PROFILE:
+            print(f"  author: {PROFILE.get('name')} ({HANDLE}) · agent {AGENT}")
+        print(f"  style guide: {style_summary()}")
+        print(f"  seeds: {len(seed_ids())} · style evidence waiting: {len(pending_events(None, every=True))}")
+        for slug in project_slugs():
+            p = Project(slug)
+            w, s = lock_owner(p), p.server()
+            print(f"  {slug}: {p.deck}" + (" (missing)" if not p.deck.exists() else "")
+                  + (" · watching" if w else "") + (f" · review {s['url']}" if s else ""))
+        if not project_slugs():
+            print("  no decks yet: pairdeck new <slug> --title \"…\"")
+        return 0
+    p = Project(args.slug)
+    st = load_state(p)
+    meta = snapshot_meta(p, st.get("base"))
+    print(f"{p.slug}: {p.title}")
+    print(f"  deck: {p.deck}" + ("" if p.deck.exists() else " (MISSING)"))
+    if meta:
+        changed = sorted(r for r, t in p.contents().items() if meta["files"].get(r) != sha1(t))
+        changed += sorted(r for r in meta["files"] if not (p.deck_dir / r).exists())
+        print(f"  snapshot: {meta['id']} ({meta['by']}, {meta['time']})" +
+              (f" · changed since: {', '.join(changed)}" if changed else " · the deck matches it"))
+    else:
+        print(f"  snapshot: none yet (`pairdeck snapshot {p.slug}` after building)")
+    w, s = lock_owner(p), p.server()
+    print("  watcher: " + (f"running, pid {w['pid']} since {w['started']}" if w else "not running"))
+    print("  review page: " + (f"{s['url']} (pid {s['pid']})" if s else f"not running (`pairdeck review {p.slug}`)"))
+    counts: dict = {}
+    for c in comment_threads(p, set(st.get("sent", []))):
+        counts[c["status"]] = counts.get(c["status"], 0) + 1
+    print("  comments: " + (", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "none yet"))
+    print(f"  style evidence waiting: {len(pending_events(p.slug))}")
+    print(f"  style guide: {style_summary()}")
+    return 0
+
+
+# ------------------------------------------------------------------------------------ main
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="pairdeck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"pairdeck {VERSION}")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", help="create your profile and data home")
+    s.add_argument("--name", help="your name (default: git's user.name)")
+    s.add_argument("--handle", help="the short name the review page shows (default: your first name)")
+    s.add_argument("--email")
+    s.add_argument("--agent", help="the agent's name on replies (default Claude)")
+    s.add_argument("--language", help="language for the agent's chat reports (default: the author's)")
+    s.add_argument("--home", help="data home (default ~/.pairdeck; another folder gets a symlink there)")
+    s.add_argument("--no-git", action="store_true", help="do not make the data home a git repository")
+    s.set_defaults(fn=cmd_setup)
+
+    s = sub.add_parser("paths", help="where the code, profile, style vault and decks are")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_paths)
+
+    s = sub.add_parser("status", help="the data home, or one deck: snapshot, watcher, review page, comments")
+    s.add_argument("slug", nargs="?")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("new", help="scaffold a deck with the engine and register it (or register an existing deck)")
+    s.add_argument("slug")
+    s.add_argument("--title", required=True, help="exact title; '|' forces a line break")
+    s.add_argument("--dir", help="the deck's folder (default ./SLUG)")
+    s.add_argument("--subtitle", default="TODO: the question this answers, in plain words")
+    s.add_argument("--meta", default="TODO: authors · occasion and year")
+    s.add_argument("--description", help="one-sentence page description (default: the subtitle)")
+    s.add_argument("--back-url", help="the top-left link back to where readers came from")
+    s.add_argument("--back-label", default="Back")
+    s.add_argument("--source-url", help="the source (paper, repository, course page)")
+    s.add_argument("--source-label", default="Source")
+    s.add_argument("--engine-url", help="engine URL prefix ending in '/', e.g. /decks/_deck/ (default: copy to ./_deck/)")
+    s.add_argument("--file", default="index.html")
+    s.add_argument("--lang", default="en")
+    s.add_argument("--force", action="store_true", help="overwrite an existing deck file")
+    s.set_defaults(fn=cmd_new)
+
+    s = sub.add_parser("qa", help="lint the deck, check the layout, screenshot every slide fully built")
+    s.add_argument("deck", help="a deck's slug, or a path to its HTML file")
+    s.add_argument("--root", help="folder to serve (default: inferred from the engine link)")
+    s.add_argument("--out", help="folder for screenshots (default: projects/SLUG/qa/ in the data home)")
+    s.add_argument("--modes", default="light,dark,narrow")
+    s.add_argument("--slides", help="e.g. 2,4-6 (default: all)")
+    s.add_argument("--after", help="JavaScript run after the builds, e.g. a click on an interaction button")
+    s.add_argument("--tag", help="suffix for screenshot names (use with --after)")
+    s.add_argument("--steps", action="store_true", help="also capture every build step of the chosen slides")
+    s.add_argument("--no-layout", action="store_true", help="skip the in-browser layout check")
+    s.add_argument("--no-shots", action="store_true", help="lint only")
+    s.set_defaults(fn=cmd_qa)
+
+    s = sub.add_parser("bundle", help="inline the engine, icons, images and fonts into one HTML file")
+    s.add_argument("deck")
+    s.add_argument("-o", "--out", help="output file (default: dist/SLUG.html in the deck's folder)")
+    s.add_argument("--engine-dir")
+    s.add_argument("--no-fonts", action="store_true", help="leave the fonts out (about 0.5 MB smaller; Latin Modern or Georgia instead)")
+    s.set_defaults(fn=cmd_bundle)
+
+    s = sub.add_parser("card", help="render a 1200x630 share image from the title slide")
+    s.add_argument("deck")
+    s.add_argument("-o", "--out", help="output PNG (default: card.png next to the deck)")
+    s.add_argument("--kicker", default="Visual introduction")
+    s.add_argument("--site", default="", help="text at the bottom right, e.g. your site's name")
+    s.add_argument("--icon", help="a small square image shown before the kicker")
+    s.set_defaults(fn=cmd_card)
+
+    s = sub.add_parser("seed", help="read your past decks (.pptx, .pdf, .html) into the style vault")
+    s.add_argument("paths", nargs="*")
+    s.add_argument("--note", help="what these decks are, e.g. 'my last three conference talks'")
+    s.add_argument("--max-pages", type=int, default=12, help="page images per file (sampled evenly)")
+    s.add_argument("--list", action="store_true", help="list past seeds")
+    s.add_argument("--forget", metavar="SEED_ID", help="remove a seed's folder and discard its events")
+    s.set_defaults(fn=cmd_seed)
+
+    s = sub.add_parser("snapshot", help="record the agent's current version of the deck")
+    s.add_argument("slug")
+    s.add_argument("-m", "--message", help="what this version changed")
+    s.set_defaults(fn=cmd_snapshot)
+
+    s = sub.add_parser("review", help="serve the deck on 127.0.0.1 with the comment overlay")
+    s.add_argument("slug")
+    s.add_argument("--port", type=int, help="port (default: the deck's own, from project.json; 0 picks a free one)")
+    s.add_argument("--open", action="store_true", help="open the page in the default browser")
+    s.set_defaults(fn=cmd_review)
+
+    s = sub.add_parser("watch", help="wait for comments and the author's edits, print one settled batch, exit")
+    s.add_argument("slug")
+    s.add_argument("--interval", type=float, default=1.5, help="seconds between checks")
+    s.add_argument("--settle", type=float, default=8.0, help="quiet seconds before a batch is sent")
+    s.add_argument("--once", action="store_true", help="check once; exit 1 if nothing is ready")
+    s.add_argument("--takeover", action="store_true", help="stop another watcher of this deck and watch here")
+    s.add_argument("--max-hours", type=float, default=0)
+    s.add_argument("--edits-are-author", action="store_true",
+                   help="the deck changed after answered comments without a snapshot, and the author made those edits")
+    s.set_defaults(fn=cmd_watch)
+
+    s = sub.add_parser("resolve", help="answer a comment; the reply shows under it on the review page")
+    s.add_argument("slug")
+    s.add_argument("cid")
+    s.add_argument("reply", nargs="?")
+    s.add_argument("--reply-file")
+    s.add_argument("--stated", action="store_true", help="the comment states a general preference: record it as evidence")
+    s.set_defaults(fn=cmd_resolve)
+
+    s = sub.add_parser("learn", help="show style evidence waiting to be learned, or acknowledge or discard it")
+    s.add_argument("slug", nargs="?")
+    s.add_argument("--all", action="store_true", help="every deck and every seed")
+    s.add_argument("--ack", nargs="*")
+    s.add_argument("--discard", nargs="*", help="evidence that is not the author's: flag it and drop it")
+    s.add_argument("--why", default="", help="with --discard: the reason, kept in the event")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-sync", action="store_true", help="do not look for new edits first")
+    s.set_defaults(fn=cmd_learn)
+
+    args = ap.parse_args(argv)
+    try:
+        return args.fn(args)
+    except PdError as exc:
+        print(f"pairdeck: {exc}")
+        return exc.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

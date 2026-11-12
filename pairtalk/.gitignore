@@ -1,0 +1,10 @@
+node_modules/
+dist/
+work/
+.local/
+.wrangler/
+wrangler.user.toml
+.dev.vars*
+__pycache__/
+*.pyc
+.DS_Store

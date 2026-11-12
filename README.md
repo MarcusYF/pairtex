@@ -1,293 +1,167 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/figures/banner-dark.svg">
-    <img src="docs/figures/banner.svg" width="100%" alt="PairTeX: pair-write your LaTeX paper with an AI coauthor, without leaving your editor.">
+    <img src="docs/figures/banner.svg" width="100%" alt="PairLab: research tools that learn your style: pair-explain, pair-write, pair-present.">
   </picture>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-27709C" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/version-0.4.3-C6952C" alt="version 0.4.3">
-  <img src="https://img.shields.io/badge/python-3.9%2B-6D5398" alt="Python 3.9+">
-  <img src="https://img.shields.io/badge/works%20with-Overleaf%20%C2%B7%20git%20%C2%B7%20any%20editor-227828" alt="works with Overleaf, git and any editor">
+  <img src="https://img.shields.io/badge/tools-PairDeck%20%C2%B7%20PairTeX%20%C2%B7%20PairTalk-C6952C" alt="three tools: PairDeck, PairTeX, PairTalk">
+  <img src="https://img.shields.io/badge/runs%20in-Claude%20Code%20%C2%B7%20Codex-6D5398" alt="runs in Claude Code or Codex">
+  <img src="https://img.shields.io/badge/no-API%20key-227828" alt="no API key">
 </p>
 
-You type a comment into the LaTeX source, right where the text is (`%! make this tighter..`). About a minute later the agent has
-edited the text, put its reply in a green note next to your comment, and published both back to the same paper. Every edit you
-keep, rewrite or undo teaches it your style, so its first drafts need fewer comments over time.
+<!-- TABBAR -->
+<p align="center"><a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-overview-on-dark.svg"><img src="docs/figures/tab-overview-on.svg" width="200" alt="PairLab: the suite"></picture></a><a href="pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairdeck-off-dark.svg"><img src="docs/figures/tab-pairdeck-off.svg" width="200" alt="PairDeck: report"></picture></a><a href="pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairtex-off-dark.svg"><img src="docs/figures/tab-pairtex-off.svg" width="200" alt="PairTeX: write"></picture></a><a href="pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairtalk-off-dark.svg"><img src="docs/figures/tab-pairtalk-off.svg" width="200" alt="PairTalk: present"></picture></a></p>
+<!-- /TABBAR -->
+
+Research has three moments when you make something for other people: after a brainstorm you report what you found, then you
+write the paper, then you give the talk. PairLab gives each moment an AI coauthor that works **where that thing lives**, in
+the background, and keeps **a style guide of you** that gets closer with every round. You give feedback the way you would to a
+colleague; the fix, and a short reply, land in the deck, the paper or the talk.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/loop-dark.svg">
-    <img src="docs/figures/loop.svg" width="100%" alt="The loop: you comment in your editor; your agent with pairtex picks up the comment, reads the text and your style, edits the .tex and replies; the edit and a green note land in the paper; what you keep, rewrite or undo feeds your style guide, which the agent reads before every edit.">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/workflow-dark.svg">
+    <img src="docs/figures/workflow.svg" width="100%" alt="Three moments of research, three tools. PairDeck reports what you found: you comment on a slide in your browser, and your agent delivers an animated HTML deck that explains one idea. PairTeX writes the paper: you write %! comments in your LaTeX source, and your agent edits the paper on Overleaf, git or a folder. PairTalk gives the talk: you and your coauthors comment on the talk site or edit the script, and your agent delivers a talk with builds and a speaker script. Under all three, your style vault, one per tool, seeded from your own papers, decks and talks, grows with every edit you keep, rewrite or undo, and is read before every piece of work. Your agent does the thinking: Claude Code, Codex, or any agent that runs shell commands, on your own plan.">
   </picture>
 </p>
+
+## What the three tools share
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/promises-dark.svg">
+    <img src="docs/figures/promises.svg" width="100%" alt="1. It learns you: a style guide per tool, in plain text, in git, in your home folder; every edit you keep, rewrite or undo is evidence; three pieces confirm a rule; your edits win. 2. You stay in flow: feedback goes where the work is (the .tex source, the slide, the script); your agent picks it up in the background, fixes it, replies next to it and publishes. 3. Starts from your work: seed each guide from papers, decks and talks you already made, so the first draft sounds and looks like you; it runs on your Claude or ChatGPT plan, with no API key.">
+  </picture>
+</p>
+
+1. **It learns you.** A chat window forgets your corrections. Each tool keeps a style guide, `STYLE.md`, with the evidence
+   behind every rule: your academic voice for papers, your visual taste for decks, your pacing and phrasing for talks. A
+   pattern becomes a rule after three independent pieces of evidence, or at once when you say "always" or "never".
+2. **You stay in flow.** No copying text into a chat and back. You comment in the LaTeX source, on the slide, or in the
+   script; a watcher wakes your agent, which fixes the work, answers next to your comment, publishes, and goes back to
+   waiting.
+3. **It starts from your own work and runs on your own plan.** `seed` reads papers, decks and talks you already made, so the
+   first draft is already close; your feedback refines it from there. The thinking happens in the coding agent you already
+   pay for: Claude Code or Codex. There is no PairLab server, model or API key.
+
+The three tools follow one contract for this memory: [docs/style-vault.md](docs/style-vault.md).
+
+## The tools
+
+### PairDeck: report what you found
+
+You give your agent the material (a paper, a project, the results of an investigation) and it builds a short web deck that
+explains one idea with pictures that build up step by step, checked slide by slide on screenshots. Then you drag a box over
+any slide in the local review page and type what should change: the agent fixes the deck in the background and replies under
+your comment. Your decks look like yours from the first one, because the style guide is seeded from decks you already made.
+
+<p align="center"><img src="pairdeck/docs/img/review-thread.png" width="100%" alt="The PairDeck review page on the example Simpson's paradox deck: two comments marked with boxes on the slide, and in the side panel the agent's reply 'Both charts now share one scale', with Keep and Follow up buttons."></p>
+
+**[Read the PairDeck page →](pairdeck/README.md)**
+
+### PairTeX: write the paper
+
+You type a comment into the LaTeX source, right where the text is (`%! make this tighter..`). About a minute later the agent
+has edited the text, put its reply in a green note next to your comment, and published both back to the same paper:
+Overleaf, any git remote, or a folder your editor saves into. Coauthors keep their own loops and their own style guides.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="pairtex/docs/figures/loop-dark.svg">
+    <img src="pairtex/docs/figures/loop.svg" width="100%" alt="The PairTeX loop: you comment in your editor; your agent with pairtex picks up the comment, reads the text and your style, edits the .tex and replies; the edit and a green note land in the paper; what you keep, rewrite or undo feeds your style guide.">
+  </picture>
+</p>
+
+**[Read the PairTeX page →](pairtex/README.md)**
+
+### PairTalk: give the talk
+
+Your talk runs in the browser, one file per slide, with builds click by click and a speaker script, one note per click.
+You, or a coauthor through your own passcode-protected site, press `c` on any slide and click, draw a box around the part
+you mean, and write. Your agent fixes the slide and the script, checks every click with screenshots, and replies under the
+comment. Only your own comments and script rewrites teach your talk style; your coauthors' get fixed and answered.
+
+<p align="center"><img src="pairtalk/docs/img/comment.png" width="100%" alt="A comment on slide 8, click 2 of the example PageRank talk, with its marked box drawn over the chart's guarantee line and the agent's reply under it."></p>
+
+**[Read the PairTalk page →](pairtalk/README.md)**
 
 ## Why not just a chatbot?
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/versus-dark.svg">
-    <img src="docs/figures/versus.svg" width="100%" alt="With a chatbot you copy text out and paste it back every round, breaking your train of thought, and it forgets your corrections. With PairTeX comments live in the .tex file, the agent works in the background, and it learns a style guide from your edits.">
-  </picture>
-</p>
+| | A chat window | PairLab |
+| --- | --- | --- |
+| **Where feedback goes** | You copy the text or slide out, and paste the answer back | Where the work is: the `.tex` source, the slide, the script |
+| **What it remembers** | Nothing between sessions; the same correction, again | A style guide per tool, with the evidence behind each rule |
+| **How it starts** | A generic voice and a generic look | Your voice and look, seeded from your own papers, decks and talks |
+| **What your coauthors see** | Nothing, until you paste it in | Every change as a commit or a new version, with a reply next to the comment |
+| **What it costs** | Another subscription or API bill | Nothing extra: the agent you already use, on your plan |
 
-## Comment where you write
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/comments-dark.svg">
-    <img src="docs/figures/comments.svg" width="100%" alt="%? asks a question that the agent answers in a note without changing text; double brackets point at words, even across lines; %! asks for a change that the agent makes and replies to; two dots send the comment. Then, in the same file: delete the note to accept, comment under it to push back, %! revert this.. to undo, %! 2.. to choose an option.">
-  </picture>
-</p>
-
-Anything a coauthor could do from a margin note works: *draft this section from the bullets above*, *read this as a
-reviewer: what is missing?*, *turn my Chinese note into a paragraph*. For a change, the agent applies it to every parallel
-place (abstract, introduction, conclusion) and says where.
-
-## A style guide that learns you
-
-A chat window forgets your corrections. PairTeX keeps what it learns about your writing, with the evidence, in a file you own.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/style-dark.svg">
-    <img src="docs/figures/style.svg" width="100%" alt="Five kinds of evidence (you rewrite the agent's text, undo an edit, state a preference, write on your own, keep an edit) go into an evidence log with word diffs, and are distilled into STYLE.md: base rules, confirmed rules, tentative patterns, words to prefer or avoid, and what you undid. The agent reads it before every edit.">
-  </picture>
-</p>
-
-A pattern starts as tentative and is confirmed after three independent pieces of evidence, or at once when you say "always"
-or "never". Your edits to `STYLE.md` win, and style never changes a claim. One guide serves all your papers, in every editor
-and with any agent; coauthors each keep their own, learned only from their own edits.
-
-## Built for real papers, with real coauthors
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/features-dark.svg">
-    <img src="docs/figures/features.svg" width="100%" alt="Works where you write: Overleaf, any git remote, a local folder, any agent. Several authors, several loops: each loop answers and learns only from its owner. Safe by default: a compile check before every publish, no deletions unasked, your typing wins, every change a commit. Ready for submission: pairtex check and pairtex clean.">
-  </picture>
-</p>
-
-## Use it with the agent you already have
-
-PairTeX has no model and needs no API key of its own. It runs inside the coding agent you already use, on your own plan:
-**Claude Code** (a Claude subscription or API key) or **Codex** (a ChatGPT plan or OpenAI API key), or any other agent that runs
-shell commands. One install serves both; switch whenever you like, since your style guide and papers live in `~/.pairtex`, not
-in the agent.
+## Install
 
 **Let your agent install it.** Paste this into Claude Code or Codex:
 
 ```text
-Install PairTeX from https://github.com/MarcusYF/pairtex and follow its AGENTS.md
+Install PairLab from https://github.com/MarcusYF/pairlab and follow its AGENTS.md
 ```
 
-It checks your tools, installs, asks your name and where your paper lives, and adds the paper. You only store your Overleaf git
-token yourself, once, in your own terminal: the agent never sees it. Details in [AGENTS.md](AGENTS.md).
+It asks which tools you want, installs them, asks your name, and offers to seed each style guide from your own work. You
+store credentials (an Overleaf token, a Cloudflare login) yourself, once, in your own terminal: the agent never sees them.
 
-## Or start in three steps yourself
+**Or yourself:**
 
 ```sh
-git clone https://github.com/MarcusYF/pairtex && cd pairtex && ./install.sh   # 1. install
-pairtex setup --name "Ada Lovelace"                                          #    and say who you are
-pairtex init mypaper --overleaf 6a1b2c3d4e5f --main main.tex                  # 2. add a paper
+git clone https://github.com/MarcusYF/pairlab && cd pairlab
+./install.sh                          # all three tools, or one: ./install.sh pairtex
+pairtex setup --name "Ada Lovelace"
+pairtex seed ~/papers/a ~/papers/b.pdf   # optional: your style, from your papers
 ```
 
-3. In Claude Code or Codex, in any folder, say **"watch mypaper"**. That session becomes the paper's coauthor: it reads your
-   style guide, starts the watcher and answers each comment as it arrives. Other agents: [AGENTS.md](AGENTS.md).
+Then, in Claude Code or Codex, say what you want: *"watch mypaper"*, *"make a deck that explains this result"*, *"draft my
+talk from these slides"*. Each tool's page has its three-step start.
 
-The rest of this page is the reference: every option, the comment rules in full, and what goes where.
+| Tool | Needs | Feedback lives in | Data home |
+| --- | --- | --- | --- |
+| PairDeck | Python 3.9+, Chrome or Chromium | a local review page in your browser | `~/.pairdeck` |
+| PairTeX | Python 3.9+, git, latexmk | your LaTeX source (Overleaf, git, a folder) | `~/.pairtex` |
+| PairTalk | Node 22+, Python 3.9+, Chrome; Cloudflare optional | a local inbox, or a shared site for coauthors | `~/.pairtalk` |
 
-## Install
+All three run on macOS and Linux (Windows: WSL).
 
-Needs Python 3.9+, git, and for the compile check latexmk (TeX Live or MacTeX). macOS and Linux; on Windows, use WSL.
+## Your data stays yours
 
-```sh
-git clone https://github.com/MarcusYF/pairtex && cd pairtex
-./install.sh                        # links the skill for Claude Code and Codex, and ~/.local/bin/pairtex
-pairtex setup --name "Ada Lovelace"      # your name exactly as Overleaf (or your git commits) shows it to coauthors
-```
+The tools talk only to the places you publish to (Overleaf, your git remote, your own Cloudflare site). Your papers, decks,
+talks, the evidence and the style guides stay in the data homes on your computer, each a git repository you can read, edit
+and revert. Your agent reads the files it works on and sends them to its model provider, as any coding agent does.
 
-`pairtex setup` creates your **data home**, `~/.pairtex` (`--home DIR` to put it elsewhere): your profile, your style vault
-and your papers' working copies. It never goes into this repository. The name matters: on a shared paper, the loop answers only
-comments written under it.
+## Repository
 
-## Add a paper
-
-Pick where the paper lives:
-
-```sh
-pairtex init mypaper --overleaf 6a1b2c3d4e5f... --main main.tex     # an Overleaf project (id from its URL)
-pairtex init mypaper --git git@github.com:me/paper.git --main main.tex
-pairtex init mypaper --folder ~/papers/mypaper --main main.tex       # a folder your editor saves into
-```
-
-Optional: `--protect ada grace` (coauthors' note macros the agent must never remove), `--title "…"`, `--compiler xelatex` (otherwise
-taken from a `% !TEX program = …` line or a `latexmkrc`, else pdfLaTeX). Then add the paper's rules to
-`~/.pairtex/projects/mypaper/NOTES.md`: its terms, where its facts come from, what must not change.
-
-- **Overleaf.** Git integration is a premium Overleaf feature; every member of a project whose owner has a premium plan can use
-  it. git asks for a username and a password the first time: the username is `git` and the password is a git authentication
-  token from your Overleaf account settings. Let your credential helper remember it (the macOS keychain, Git Credential Manager,
-  or libsecret on Linux); `pairtex` never stores it.
-- **Git remote.** Your own commits are your edits. Commit and push to send a comment.
-- **Folder.** Save the file to send a comment. The agent writes its edit back into the folder, but only into a file you have not
-  saved again since; otherwise it merges with your newer version first. Let your editor reload files changed on disk: VS Code does
-  this for files without unsaved changes (turn on `files.autoSave`); in Emacs use `global-auto-revert-mode`; in Vim `:set
-  autoread`. Every version, yours and the agent's, is kept in `~/.pairtex/projects/mypaper/folder.git`.
-
-## Start the loop
-
-In Claude Code or Codex, in any folder: "watch mypaper" (or 监听 mypaper). That session becomes the paper's coauthor: it reads your style
-guide, starts the watcher in the background and tells you it is listening. One session per paper; to move the loop, ask another
-session to take it over.
-
-## Comment
-
-Two markers, one character each, after LaTeX's `%` (so nothing reaches the PDF), and `..` to send:
-
-| Type | To | The agent |
-| --- | --- | --- |
-| `%! … ..` | ask for a change | edits the text, replies in a green note next to it, publishes |
-| `%? … ..` | ask a question ("why was this written so in the last version?", "what does this sentence do for the paper?") | answers in a green note and changes no text |
-
-```latex
-Iterative preference optimization trains ... (a paragraph)
-%! too many jargons here; explain reference refresh before using it,
-% and keep it under five lines..
-
-The policy converges whenever the gain is small. %? is this proved, or only observed?..
-
-We study the loop. [[One round of training is one mirror step.]] The target is the tilted reference.
-%? why does this sentence come before the target?..
-```
-
-- **Where it points.** A comment line under a paragraph is about that paragraph; at the end of a line, about that line.
-- **Part of a paragraph.** Put `[[` and `]]` around the words you mean, even across lines. The brackets show in the PDF while the
-  comment waits and the agent removes them when it answers. `【` `】` work too.
-- **Mid-sentence.** `%!` in the middle of a line marks that point; LaTeX hides the rest of that line until the agent answers, and
-  the agent puts the hidden words back. You can also go on writing after the comment's `..` on the same line
-  (`For small $n$ %! is this tight?.., the bound holds.`): those words are your sentence, and they come back after the comment's
-  point.
-- **`..` sends it.** Take as long as you like; a comment can run over several `%!` or `%` lines. Three dots are an ellipsis and do
-  not end it (`such as PPO, ..., SFT` is safe).
-- Write it the way you would to a coauthor: "this sentence", "this section", "everywhere" all work. For a change, the agent applies
-  it to every parallel place (abstract, introduction, conclusion) and says where.
-- Anything a coauthor could do from a comment works: "draft this section from the bullets above", "read this as a reviewer: what
-  is missing?", "turn my Chinese note into a paragraph".
-
-## See the answer
-
-A minute or so later your comment has become one line, a green note in the PDF where you commented:
-
-```latex
-Iterative preference optimization trains ... (the revised paragraph)
-\claude{c7}{too many jargons here; explain reference refresh before using it, and keep it under five lines}{Defined
-reference refresh at first use (also in the abstract); cut the recipe list to one clause. 4 lines.}
-```
-
-It reads, in green: "[c7] **Ada:** too many jargons here; … **Claude:** Defined reference refresh at first use …". The first
-note adds the `\claude` macro to the preamble. Where a note would break the build (an equation, a table, a caption, a footnote,
-the preamble), the thread stays in `%` lines instead (`%!c8 …` and `%!c8> …`). Text your engine cannot print (Chinese under
-pdfLaTeX) stays word for word in a `%` line above its note; under XeLaTeX or LuaLaTeX with ctex or xeCJK it goes in the note.
-
-| You want to | Do this |
+| Path | What it is |
 | --- | --- |
-| Accept | Delete the note's line. Edit the new text first if you like: your edits teach the style guide |
-| Follow up or push back | Write `%! … ..` or `%? … ..` directly under the note. The agent sees the whole thread |
-| Turn an answer into a change | `%! do it..` under the question's note |
-| Undo | `%! revert this..` under the note |
-| Choose between options the agent offered | `%! 2..` under the note |
-| Hide every note in the PDF | Delete the first `%` of the `% \def\hideclaudenotes{}` line in the preamble |
+| [`pairdeck/`](pairdeck/README.md) | PairDeck: the `pairdeck` command, its skill, the deck engine, an example deck, tests |
+| [`pairtex/`](pairtex/README.md) | PairTeX: the `pairtex` command, its skill, templates, tests |
+| [`pairtalk/`](pairtalk/README.md) | PairTalk: the `pairtalk` command, its skill, the talk engine, the optional shared site, an example talk, tests |
+| [`shared/`](shared/) | Code two tools share: reading slides and decks for `seed` |
+| [`docs/style-vault.md`](docs/style-vault.md) | The contract the three style vaults follow |
+| `install.sh`, [`AGENTS.md`](AGENTS.md) | Install one tool or all; how agents install and run them |
+| `bin/`, `skill` | Links to each tool's command, and PairTeX's skill where installs from before 0.5 expect it |
+| [`CHANGELOG.md`](CHANGELOG.md) | Releases of the suite; each tool has its own changelog |
 
-## Coauthors
+## Status
 
-Several people can run their own loop on one paper. Each loop answers only its owner's comments (Overleaf records who typed
-what), numbers them with its owner's prefix (`ada7`, `grace3`), and learns only from its owner's edits, into its owner's style vault.
-A comment by a coauthor who runs no loop is left alone; to answer it from your loop, add them to the paper's `project.json`:
+PairTeX 0.5 is in daily use on papers in progress, written on Overleaf with coauthors. PairDeck and PairTalk 0.1 are first
+public releases of tools built for the author's own research reports and conference talks. Issues and pull requests are
+welcome.
 
-```json
-"comments_from": {"Grace Hopper": "Grace"}
-```
+## Acknowledgments
 
-Their notes then say "[c9] **Grace:** …". Do not list someone who runs their own loop on the same paper; `pairtex status` warns if you do.
-
-## Your writing style guide
-
-`~/.pairtex/vault/STYLE.md` is read before every edit and grows after every batch. The evidence behind it is in
-`vault/evidence.jsonl`, one event per line:
-
-- **You rewrote the agent's text** (before or after accepting): the word-level diff from its version to yours. The strongest
-  signal.
-- **You undid an edit**: recorded under "What … undid", so it is not repeated.
-- **Your comments**: preferences you state ("too dry", "以后不要…") become rules in your words; "always", "never" and "以后" make
-  them confirmed at once.
-- **Your own writing** in the editor: style patterns in what you write and cut yourself (content changes are ignored).
-- **Edits you kept as written**: confirm the rules the agent applied.
-
-A pattern starts as tentative and becomes confirmed after three independent pieces of evidence, or when you say it is general.
-Paper-specific points (terms, notation) go to that paper's `NOTES.md` instead. Edit STYLE.md yourself whenever you disagree: your
-edits win. The data home is a git repository, so every change to the guide is a commit you can read or undo.
-
-## Before submission
-
-```sh
-pairtex check mypaper                         # notes, comments, threads, [[ ]], the note macro and coauthor notes still in the paper
-pairtex clean mypaper --out ~/submit --compile   # a copy without them, and without % comments (arXiv publishes your source)
-```
-
-`--keep-comments` keeps your ordinary `%` comments. Coauthor notes stay in the clean copy; `pairtex clean` says so.
-
-## What goes where
-
-- `pairtex` itself talks only to the paper's git remote (or reads your folder). It sends nothing anywhere else.
-- The agent reads the comment, the paragraph around it, your style guide and the paper's notes, and sends them to its model
-  provider, as any coding agent does with the files it works on.
-- Your profile, style vault and working copies stay in your data home. Notes are visible to anyone who reads the PDF; set
-  `"notes": "source"` in a paper's `project.json` to keep threads in `%` lines instead.
-
-## Commands
-
-The agent runs these; they are here for reference.
-
-| Command | What it does |
-| --- | --- |
-| `pairtex setup --name …` | Your profile and data home (name, the handle notes print, comment-id prefix, agent name) |
-| `pairtex init SLUG --overleaf ID \| --git URL \| --folder DIR` | Registers a paper and makes the loop's own working copy |
-| `pairtex status SLUG` | Head, checkout, watcher, comments by state, comments left to coauthors, evidence waiting |
-| `pairtex watch SLUG` | Polls the paper (every 8 s, slower when idle), takes the comments that end with `..`, prints the batch and exits |
-| `pairtex resolve SLUG c7 "reply"` | Turns comment c7 into a green note with the reply (`--plain`: `%` lines) and records which edits answered it |
-| `pairtex push SLUG -m "…"` | Compile check (only new LaTeX errors block), guards, commit, merge with your newer typing, publish |
-| `pairtex learn SLUG [--ack E0012 …]` | Shows style evidence in full, or marks it learned |
-| `pairtex show SLUG [c7] [--all] [--diff]` | Comments in progress, or the whole history |
-| `pairtex check SLUG` / `pairtex clean SLUG --out DIR` | Before submission: what is left; a clean copy |
-| `pairtex paths` | Where the code, profile, vault and papers are |
-| `pairtex migrate` | Moves data out of the code folder (installs from before 0.4) |
-
-**Safety built in.** `push` refuses to publish new files, to remove a protected coauthor note, to delete a thread, or to introduce
-a LaTeX error the paper did not have. If you edit the same lines while the agent works, nothing is published: its diff is saved
-under `projects/<slug>/conflicts/` and redone on your new text. Edits on neighbouring lines merge automatically. Every change is
-an ordinary commit (`pairtex: c7: …`) in the paper's history, so any edit can be reverted.
-
-**Limits.** Overleaf's own review comments (the comment bubbles) are not in its git history, so the loop cannot see them: use
-`%!` and `%?`. The compile check runs locally with your TeX installation, which can differ slightly from Overleaf's. Who wrote a
-comment or an edit is read from the name on each Overleaf commit; if Overleaf ever records two people's simultaneous edits in one
-commit, the loop takes them as the edits of the person that commit names.
-
-## Files
-
-| Path | Purpose |
-| --- | --- |
-| `bin/pairtex` | The command-line tool (Python 3.9+, standard library, git, latexmk); `bin/ow` is its old name |
-| `skill/` | The agent skill, linked at `~/.claude/skills/pairtex` (Claude Code) and `~/.agents/skills/pairtex` (Codex) by `install.sh` |
-| `AGENTS.md` | For agents: which agent and plan, installing PairTeX for the user, running the loop |
-| `templates/` | Starting points for a new style guide, loop preferences and paper notes |
-| `tests/test_e2e.py` | End-to-end test against local stand-ins for Overleaf, a git remote and a folder: `python3 tests/test_e2e.py` |
-| `ROADMAP.md`, `CHANGELOG.md` | What comes next, what changed |
-| `docs/figures/` | The figures on this page and `make_figures.py`, which draws them (light and dark) |
-| `LICENSE` | MIT |
-| `~/.pairtex/` | Your data: `profile.json`, `vault/` (STYLE.md, evidence.jsonl, preferences.md), `projects/<slug>/` |
+PairTalk is built on [html-slide](https://github.com/Yanwei-Sun/html-slide) by **Yanwei Sun**, an HTML slide template for
+research talks whose comments a coding agent can act on; its slide engine, comment panel and review site started there
+([pairtalk/NOTICE.md](pairtalk/NOTICE.md)). PairDeck's and PairTalk's slides use the Computer Modern fonts (SIL Open Font
+License) and MathJax (Apache 2.0).
 
 ## License
 
-MIT ([LICENSE](LICENSE)). PairTeX is an independent project, not affiliated with Overleaf.
+MIT ([LICENSE](LICENSE)), except PairTalk's code derived from html-slide, which keeps html-slide's own permissive notice
+([pairtalk/NOTICE.md](pairtalk/NOTICE.md)). PairLab is an independent project, not affiliated with Overleaf, Anthropic, OpenAI or Cloudflare.

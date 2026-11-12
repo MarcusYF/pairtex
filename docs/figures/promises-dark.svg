@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 228" width="960" height="228" role="img" aria-label="What the three tools share: they learn your style; you stay in flow while the agent works in the background; each starts from your own past work and runs on your own agent plan">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#E6EDF3} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#9198A1"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#D4A33A"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#B39DDB"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5AA8DA"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5DBB63"/></marker></defs>
+<rect x="10" y="6" width="300" height="214" rx="10" fill="#261E0F" stroke="#D4A33A" stroke-width="1.8"/>
+<circle cx="36" cy="36" r="11" fill="#D4A33A"/><text x="36" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">1</text>
+<text x="56" y="42" font-size="19" class="b" style="fill:#E3B95A">It learns you</text>
+<text x="32" y="78" font-size="16">A style guide per tool, in plain</text>
+<text x="32" y="104" font-size="16">text, in git, in your home folder.</text>
+<text x="32" y="130" font-size="16">Every edit you keep, rewrite or</text>
+<text x="32" y="156" font-size="16">undo is evidence; three pieces</text>
+<text x="32" y="182" font-size="16">confirm a rule. Your edits win.</text>
+<rect x="330" y="6" width="300" height="214" rx="10" fill="#0F2536" stroke="#5AA8DA" stroke-width="1.8"/>
+<circle cx="356" cy="36" r="11" fill="#D4A33A"/><text x="356" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">2</text>
+<text x="376" y="42" font-size="19" class="b" style="fill:#5AA8DA">You stay in flow</text>
+<text x="352" y="78" font-size="16">Feedback goes where the work is:</text>
+<text x="352" y="104" font-size="16">the .tex source, the slide, the</text>
+<text x="352" y="130" font-size="16">script. Your agent picks it up in</text>
+<text x="352" y="156" font-size="16">the background, fixes it, replies</text>
+<text x="352" y="182" font-size="16">next to it and publishes.</text>
+<rect x="650" y="6" width="300" height="214" rx="10" fill="#231C33" stroke="#B39DDB" stroke-width="1.8"/>
+<circle cx="676" cy="36" r="11" fill="#D4A33A"/><text x="676" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">3</text>
+<text x="696" y="42" font-size="19" class="b" style="fill:#B39DDB">Starts from your work</text>
+<text x="672" y="78" font-size="16">Seed each guide from papers,</text>
+<text x="672" y="104" font-size="16">decks and talks you already made,</text>
+<text x="672" y="130" font-size="16">so the first draft sounds and</text>
+<text x="672" y="156" font-size="16">looks like you. It runs on your</text>
+<text x="672" y="182" font-size="16">Claude or ChatGPT plan: no API key.</text>
+</svg>

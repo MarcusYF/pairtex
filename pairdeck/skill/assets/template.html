@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE_TEXT}}</title>
+<meta name="description" content="{{DESCRIPTION}}">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{TITLE_TEXT}}">
+<meta property="og:description" content="{{DESCRIPTION}}">
+<!-- On a public site, add og:url and og:image (card.png from `pairdeck card`) with absolute URLs. -->
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="{{ENGINE}}deck.css">
+<script defer src="{{ENGINE}}deck.js"></script>
+</head>
+<body>
+<header class="dk-bar">
+  {{BACK_LINK}}
+  <span class="dk-paper">{{TITLE_TEXT}}</span>
+  {{SOURCE_LINK}}
+</header>
+
+<main class="dk-deck" aria-label="Slides: use the arrow keys or the buttons below">
+
+  <!-- 1 Title -->
+  <section class="dk-slide">
+    <div class="dk-inner">
+      <h1 class="dk-h">{{TITLE_HTML}}</h1>
+      <hr class="dk-rule">
+      <p class="dk-sub">{{SUBTITLE}}</p>
+      <p class="dk-meta">{{META}}</p>
+      <p class="dk-hint">Press → or click to step through</p>
+    </div>
+  </section>
+
+  <!-- 2 Setting: who acts and what flows where. TODO: replace this skeleton with the real diagram. -->
+  <section class="dk-slide" data-label="Setting">
+    <div class="dk-inner">
+      <h2 class="dk-h">TODO: headline that states the setting</h2>
+      <figure class="dk-fig" style="max-width:940px">
+        <svg viewBox="0 0 960 380">
+          <g data-step="1" class="dk-rise">
+            <svg x="70" y="150" width="56" height="56" class="icon c-creator"><use href="{{ENGINE}}icons.svg#creator"/></svg>
+            <text x="98" y="240" text-anchor="middle" class="t-creator" font-size="24">producers</text>
+          </g>
+          <g data-step="2" class="dk-rise">
+            <path class="ln s-creator dk-draw" d="M140 178 H380"/>
+            <svg x="392" y="104" width="150" height="150" class="icon c-platform"><use href="{{ENGINE}}icons.svg#platform"/></svg>
+            <text x="467" y="290" text-anchor="middle" class="t-platform" font-size="24">system</text>
+          </g>
+          <g data-step="3" class="dk-rise">
+            <path class="ln s-platform dk-draw" d="M548 178 H800"/>
+            <svg x="820" y="150" width="56" height="56" class="icon c-people"><use href="{{ENGINE}}icons.svg#person"/></svg>
+            <text x="848" y="240" text-anchor="middle" class="t-people" font-size="24">people</text>
+          </g>
+        </svg>
+      </figure>
+      <p class="dk-take" data-step="3">TODO: one takeaway line.</p>
+    </div>
+  </section>
+
+  <!-- TODO: the problem slide, 2–4 result slides (one idea each), and one "Try it" slide with a real interaction. -->
+
+  <!-- Last: takeaways -->
+  <section class="dk-slide" data-label="Takeaways">
+    <div class="dk-inner">
+      <h2 class="dk-h">TODO: what this means</h2>
+      <ol class="dk-list">
+        <li data-step="1" data-dim="2" class="dk-rise"><span class="n">1</span><span class="t">TODO</span><span class="d">TODO</span></li>
+        <li data-step="2" data-dim="3" class="dk-rise"><span class="n">2</span><span class="t">TODO</span><span class="d">TODO</span></li>
+        <li data-step="3" class="dk-rise"><span class="n">3</span><span class="t">TODO</span><span class="d">TODO</span></li>
+      </ol>
+      <p class="dk-note" data-step="3">{{NOTE_LINKS}}</p>
+    </div>
+  </section>
+</main>
+
+<nav class="dk-nav" aria-label="Slides">
+  <button type="button" data-dk-prev aria-label="Previous">←</button>
+  <span class="dk-dots" aria-hidden="true"></span>
+  <span data-dk-count aria-live="polite"></span>
+  <button type="button" data-dk-next aria-label="Next">→</button>
+</nav>
+
+<script>
+/* This deck's interactions. Register hooks after DOMContentLoaded; see references/components.md §6. */
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 180" width="960" height="180" role="img" aria-label="PairDeck: animated explainer decks with your AI agent, in a style that learns yours">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#232323} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6B6B6B"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#C6952C"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6D5398"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#27709C"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#227828"/></marker></defs>
+<text x="4" y="26" font-size="13.5" style="fill:#6B6B6B" letter-spacing="2.2">OPEN SOURCE  ·  MIT LICENSE  ·  FOR EXPLAINER AND REPORT DECKS</text>
+<text x="0" y="104" font-size="78" class="b" letter-spacing="-1">PairDeck</text>
+<rect x="462" y="36" width="78" height="52" rx="5" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="1.6"/>
+<rect x="452" y="46" width="78" height="52" rx="5" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="1.6"/>
+<rect x="442" y="56" width="78" height="52" rx="5" fill="#FFFFFF" stroke="#6B6B6B" stroke-width="1.8"/>
+<rect x="454" y="70" width="44" height="9" rx="2" fill="#27709C"/>
+<rect x="454" y="85" width="34" height="9" rx="2" fill="#3F8A7E"/>
+<rect x="488" y="66" width="26" height="31" rx="3" fill="none" stroke="#27709C" stroke-width="1.6" stroke-dasharray="4 3"/>
+<text x="2" y="150" font-size="25">Animated explainer decks with your <tspan class="b" style="fill:#6D5398">AI agent</tspan>, in a style that learns yours.</text>
+<rect x="2" y="168" width="170" height="3" fill="#C6952C"/>
+</svg>

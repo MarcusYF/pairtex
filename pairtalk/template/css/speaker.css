@@ -1,0 +1,53 @@
+/* Derived from html-slide by Yanwei Sun (https://github.com/Yanwei-Sun/html-slide); see NOTICE.md. */
+/* Speaker view (js/speaker.js). Left: the current slide, and under it the next click beside the timer. Right: the script,
+   the full height of the window, so a long note fits without scrolling. Sizes follow the window: --h is the current
+   slide's height, as large as the left column's width allows while the row below it still fits. */
+body.speaker-view { background: #EFEFEC;
+  --h: min(calc((58vw - 40px) * 9 / 16), calc((100vh - 150px) / 1.45)); --w: calc(var(--h) * 16 / 9); }
+body.speaker-view #viewport, body.speaker-view.script-on #viewport {
+  inset: auto; left: 20px; top: 48px; width: var(--w); height: var(--h); background: transparent; }
+body.speaker-view #stage { box-shadow: 0 0 0 2px rgba(0,0,0,.06), 0 12px 60px rgba(0,0,0,.10); }
+body.speaker-view.pres-idle, body.speaker-view.pres-idle * { cursor: auto !important; }   /* the pointer stays visible here */
+body.speaker-view #pres-handle { display: none; }                                         /* M still opens the menu */
+
+#speaker { line-height: 1.3; }   /* this font collapses line-height: normal */
+#speaker .cap { position: fixed; font-size: 18px; color: var(--ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#speaker .cap.now { left: 20px; top: 16px; width: var(--w); }
+#speaker .cap.nxt { left: 20px; top: calc(48px + var(--h) + 16px); width: calc(var(--w) * .45); }
+#speaker .pv { position: fixed; left: 20px; top: calc(48px + var(--h) + 46px); width: calc(var(--w) * .45); aspect-ratio: 16 / 9;
+  background: var(--paper); overflow: hidden; box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 6px 30px rgba(0,0,0,.08); }
+#speaker .pv iframe { display: block; width: 100%; height: 100%; border: 0; pointer-events: none; }
+#speaker .pv .end { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: var(--paper); font-size: 20px; color: var(--ink3); }
+#speaker .pv.done .end { display: flex; }
+
+/* the timer, beside the next click */
+#speaker .clock { position: fixed; left: calc(20px + var(--w) * .45 + 32px); width: calc(var(--w) * .55 - 32px); top: calc(48px + var(--h) + 38px); }
+#speaker .tm { font-size: clamp(36px, calc(var(--w) * .075), 64px); line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#speaker .tm .of { font-size: .47em; color: var(--ink3); margin-left: 8px; }
+#speaker .tm.warn .el { color: var(--gold); }
+#speaker .tm.over .el { color: var(--red); }
+#speaker .tm.paused .el { color: var(--ink3); }
+#speaker .pace { position: relative; height: 6px; margin: 18px 0 16px; background: #DEDEDA; border-radius: 3px; }
+#speaker .pace i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--gold); border-radius: 3px; }
+#speaker .tm.over + .pace i { background: var(--red); }
+#speaker .pace b { position: absolute; top: -5px; width: 3px; height: 16px; margin-left: -1px; background: var(--blue); border-radius: 1px; }
+#speaker .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 17px; color: var(--ink2); }
+#speaker .row button { font-family: "CM", serif; font-size: 17px; color: var(--ink); background: var(--paper); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 5px 16px; cursor: pointer; line-height: 1.2; }
+#speaker .row button:hover { border-color: var(--ink3); }
+#speaker .wall { margin-left: auto; font-size: 24px; white-space: nowrap; }
+#speaker .link, #speaker .bl { margin-top: 12px; font-size: 17px; color: var(--ink3); }
+#speaker .link.on { color: var(--green); }
+#speaker .bl { display: none; color: var(--red); }
+#speaker .bl.on { display: block; }
+
+/* the script: the engine's script panel, as the right-hand column */
+body.speaker-view #script { top: 16px; bottom: 20px; right: 20px; left: calc(20px + var(--w) + 24px); width: auto;
+  border: 0; padding: 22px 28px 60vh; box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 6px 30px rgba(0,0,0,.08); }
+body.speaker-view #script .sh { display: none; }   /* the caption over the slide says where you are */
+body.speaker-view #script .nx { line-height: 1.35; }   /* a long "next:" title can wrap in this column */
+
+/* the next-click preview (?preview) shows the slide alone */
+body.speaker-preview #bar, body.speaker-preview #pres-handle, body.speaker-preview #jump, body.speaker-preview #cmt,
+body.speaker-preview #script-sync-status { display: none !important; }
+body.print #speaker { display: none !important; }

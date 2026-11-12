@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 180" width="960" height="180" role="img" aria-label="PairTalk: talk slides your AI coauthor fixes from comments, in the way you present">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#E6EDF3} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#9198A1"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#D4A33A"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#B39DDB"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5AA8DA"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5DBB63"/></marker></defs>
+<text x="4" y="26" font-size="13.5" style="fill:#9198A1" letter-spacing="2.2">OPEN SOURCE  ·  MIT LICENSE  ·  FOR RESEARCH TALKS</text>
+<text x="0" y="104" font-size="78" class="b" letter-spacing="-1">Pair<tspan style="fill:#B39DDB">Talk</tspan></text>
+<text x="2" y="150" font-size="25">Talk slides your <tspan class="b" style="fill:#B39DDB">AI coauthor</tspan> fixes from comments, in the way you present.</text>
+<rect x="2" y="168" width="170" height="3" fill="#D4A33A"/>
+</svg>

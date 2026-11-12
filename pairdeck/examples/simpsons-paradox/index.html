@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simpson's paradox</title>
+<meta name="description" content="How can a treatment win in every group and still lose overall? A step-by-step look at Simpson's paradox with data from a kidney-stone study.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Simpson's paradox">
+<meta property="og:description" content="How can a treatment win in every group and still lose overall?">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="../../skill/assets/engine/deck.css">
+<script defer src="../../skill/assets/engine/deck.js"></script>
+</head>
+<body>
+<header class="dk-bar">
+  <span></span>
+  <span class="dk-paper">Simpson's paradox</span>
+  <a href="https://doi.org/10.1136/bmj.292.6524.879" target="_blank" rel="noopener">Data: BMJ 1986 ↗</a>
+</header>
+
+<main class="dk-deck" aria-label="Slides: use the arrow keys or the buttons below">
+
+  <!-- 1 Title -->
+  <section class="dk-slide">
+    <div class="dk-inner">
+      <h1 class="dk-h">Simpson's paradox</h1>
+      <hr class="dk-rule">
+      <p class="dk-sub">How can a treatment win in every group and still lose overall?</p>
+      <p class="dk-meta">A PairDeck example · data from a 1986 study of kidney-stone treatments</p>
+      <p class="dk-hint">Press → or click to step through</p>
+    </div>
+  </section>
+
+  <!-- 2 Setting: patients, stone sizes, two treatments -->
+  <section class="dk-slide" data-label="Setting">
+    <div class="dk-inner">
+      <h2 class="dk-h">700 patients, two kinds of stones, two treatments</h2>
+      <figure class="dk-fig" style="max-width:940px">
+        <svg viewBox="0 0 960 320" role="img" aria-label="700 patients split into small and large stones, each treated with A or B">
+          <g data-step="1" class="dk-rise">
+            <svg x="44" y="62" width="48" height="48" class="icon c-muted"><use href="../../skill/assets/engine/icons.svg#person"/></svg>
+            <svg x="104" y="62" width="48" height="48" class="icon c-muted"><use href="../../skill/assets/engine/icons.svg#person"/></svg>
+            <svg x="164" y="62" width="48" height="48" class="icon c-muted"><use href="../../skill/assets/engine/icons.svg#person"/></svg>
+            <svg x="44" y="128" width="48" height="48" class="icon c-muted"><use href="../../skill/assets/engine/icons.svg#person"/></svg>
+            <svg x="104" y="128" width="48" height="48" class="icon c-muted"><use href="../../skill/assets/engine/icons.svg#person"/></svg>
+            <svg x="164" y="128" width="48" height="48" class="icon c-muted"><use href="../../skill/assets/engine/icons.svg#person"/></svg>
+            <text x="128" y="222" text-anchor="middle" class="t-ink" font-size="22">700 patients</text>
+            <text x="128" y="248" text-anchor="middle" class="t-muted" font-size="16">with kidney stones</text>
+          </g>
+          <g data-step="2" class="dk-rise">
+            <path class="ln s-muted dk-draw" d="M226 108 C268 108 280 82 318 82"/>
+            <path class="ln s-muted dk-draw" d="M226 136 C268 136 280 214 318 214"/>
+            <rect x="326" y="40" width="236" height="84" rx="6" class="f-soft s-muted" stroke-width="1.6"/>
+            <circle cx="362" cy="82" r="8" class="f-creator-soft s-creator" stroke-width="1.8"/>
+            <text x="390" y="78" class="t-ink" font-size="20">small stones</text>
+            <text x="390" y="102" class="t-muted" font-size="16">easier to remove</text>
+            <rect x="326" y="172" width="236" height="84" rx="6" class="f-soft s-muted" stroke-width="1.6"/>
+            <circle cx="362" cy="214" r="17" class="f-creator-soft s-creator" stroke-width="1.8"/>
+            <text x="390" y="210" class="t-ink" font-size="20">large stones</text>
+            <text x="390" y="234" class="t-muted" font-size="16">harder to remove</text>
+          </g>
+          <g data-step="3" class="dk-rise">
+            <path class="ln-thin s-faint dk-draw" d="M570 82 C610 82 616 82 652 82"/>
+            <path class="ln-thin s-faint dk-draw" d="M570 92 C612 100 610 200 652 206"/>
+            <path class="ln-thin s-faint dk-draw" d="M570 204 C612 198 610 98 652 92"/>
+            <path class="ln-thin s-faint dk-draw" d="M570 214 C610 214 616 214 652 214"/>
+            <rect x="660" y="40" width="260" height="84" rx="6" class="f-people-soft s-people" stroke-width="1.8"/>
+            <text x="684" y="76" class="t-people" font-size="22">Treatment A</text>
+            <text x="684" y="102" class="t-muted" font-size="16">open surgery · 350 patients</text>
+            <rect x="660" y="172" width="260" height="84" rx="6" class="f-teal-soft s-teal" stroke-width="1.8"/>
+            <text x="684" y="208" class="t-teal" font-size="22">Treatment B</text>
+            <text x="684" y="234" class="t-muted" font-size="16">keyhole surgery · 350 patients</text>
+            <text x="790" y="296" text-anchor="middle" class="t-muted" font-size="16">success: the stone was removed</text>
+          </g>
+        </svg>
+      </figure>
+      <p class="dk-take" data-step="3">Each patient had small or large stones, and got treatment A or B.</p>
+      <p class="dk-note" data-step="3">Data: 700 patients in a 1986 comparison of kidney-stone treatments (Charig and colleagues, BMJ).</p>
+    </div>
+  </section>
+
+  <!-- 3 Within each group, A wins -->
+  <section class="dk-slide" data-label="Within groups">
+    <div class="dk-inner">
+      <h2 class="dk-h">Small stones or large, A succeeds more often</h2>
+      <div class="dk-cols">
+        <figure class="dk-fig" style="max-width:470px">
+          <svg viewBox="0 0 460 200" role="img" aria-label="Small stones: A 93 percent, B 87 percent">
+            <text x="20" y="28" class="t-ink" font-size="20">Small stones</text>
+            <text x="440" y="28" text-anchor="end" class="t-muted" font-size="15">success rate</text>
+            <path class="ln-thin s-line" d="M80 46 V166 H380"/>
+            <path class="ln-thin s-faint" d="M380 166 V174"/>
+            <text x="380" y="188" text-anchor="middle" class="t-faint" font-size="15">100%</text>
+            <g data-step="1">
+              <text x="66" y="83" text-anchor="end" class="t-people" font-size="20">A</text>
+              <rect class="f-people dk-grow" x="80" y="58" width="279.3" height="36" rx="3"/>
+              <text x="367" y="83" class="t-people" font-size="19">93%</text>
+              <text x="66" y="141" text-anchor="end" class="t-teal" font-size="20">B</text>
+              <rect class="f-teal dk-grow" x="80" y="116" width="260" height="36" rx="3" style="transition-delay:.08s"/>
+              <text x="348" y="141" class="t-teal" font-size="19">87%</text>
+            </g>
+          </svg>
+        </figure>
+        <figure class="dk-fig" style="max-width:470px">
+          <svg viewBox="0 0 460 200" role="img" aria-label="Large stones: A 73 percent, B 69 percent">
+            <text x="20" y="28" class="t-ink" font-size="20">Large stones</text>
+            <text x="440" y="28" text-anchor="end" class="t-muted" font-size="15">success rate</text>
+            <path class="ln-thin s-line" d="M80 46 V166 H380"/>
+            <path class="ln-thin s-faint" d="M380 166 V174"/>
+            <text x="380" y="188" text-anchor="middle" class="t-faint" font-size="15">100%</text>
+            <g data-step="2">
+              <text x="66" y="83" text-anchor="end" class="t-people" font-size="20">A</text>
+              <rect class="f-people dk-grow" x="80" y="58" width="219" height="36" rx="3"/>
+              <text x="307" y="83" class="t-people" font-size="19">73%</text>
+              <text x="66" y="141" text-anchor="end" class="t-teal" font-size="20">B</text>
+              <rect class="f-teal dk-grow" x="80" y="116" width="206.3" height="36" rx="3" style="transition-delay:.08s"/>
+              <text x="294" y="141" class="t-teal" font-size="19">69%</text>
+            </g>
+          </svg>
+        </figure>
+      </div>
+      <p class="dk-take" data-step="3">In both groups A does better: by 6 points on small stones, by 4 on large ones.</p>
+      <p class="dk-note" data-step="3">Small stones: A 81 of 87, B 234 of 270. Large stones: A 192 of 263, B 55 of 80.</p>
+    </div>
+  </section>
+
+  <!-- 4 Overall, B wins -->
+  <section class="dk-slide" data-label="All patients">
+    <div class="dk-inner">
+      <h2 class="dk-h">Put the groups together, and B wins</h2>
+      <figure class="dk-fig" style="max-width:720px">
+        <svg viewBox="0 0 520 210" role="img" aria-label="All patients: A 78 percent, B 83 percent">
+          <text x="20" y="28" class="t-ink" font-size="20">All patients</text>
+          <text x="420" y="28" text-anchor="end" class="t-muted" font-size="15">success rate</text>
+          <path class="ln-thin s-line" d="M80 46 V166 H420"/>
+          <path class="ln-thin s-faint" d="M420 166 V174"/>
+          <text x="420" y="188" text-anchor="middle" class="t-faint" font-size="15">100%</text>
+          <g data-step="1">
+            <text x="66" y="83" text-anchor="end" class="t-people" font-size="20">A</text>
+            <rect class="f-people dk-grow" x="80" y="58" width="265.2" height="36" rx="3"/>
+            <text x="353" y="83" class="t-people" font-size="19">78%</text>
+            <text x="66" y="141" text-anchor="end" class="t-teal" font-size="20">B</text>
+            <rect class="f-teal dk-grow" x="80" y="116" width="280.7" height="36" rx="3" style="transition-delay:.08s"/>
+            <text x="368" y="141" class="t-teal" font-size="19">83%</text>
+          </g>
+        </svg>
+      </figure>
+      <p class="dk-take" data-step="2">The same patients and the same outcomes, yet the totals point the other way.</p>
+      <p class="dk-note" data-step="2">A: 273 of 350 succeeded. B: 289 of 350.</p>
+    </div>
+  </section>
+
+  <!-- 5 Why: the mix -->
+  <section class="dk-slide" data-label="Why">
+    <div class="dk-inner">
+      <h2 class="dk-h">A got most of the hard cases</h2>
+      <figure class="dk-fig" style="max-width:720px">
+        <svg viewBox="0 0 520 220" role="img" aria-label="A's patients: 87 small and 263 large stones. B's: 270 small and 80 large.">
+          <rect x="80" y="14" width="16" height="16" rx="3" class="f-soft s-muted" stroke-width="1.4"/>
+          <text x="104" y="28" class="t-muted" font-size="16">small stones</text>
+          <rect x="230" y="14" width="16" height="16" rx="3" class="f-creator-soft s-creator" stroke-width="1.4"/>
+          <text x="254" y="28" class="t-muted" font-size="16">large stones</text>
+          <g data-step="1" class="dk-rise">
+            <text x="66" y="89" text-anchor="end" class="t-people" font-size="20">A</text>
+            <rect x="80" y="62" width="74.6" height="40" rx="3" class="f-soft s-muted" stroke-width="1.4"/>
+            <rect x="154.6" y="62" width="225.4" height="40" rx="3" class="f-creator-soft s-creator" stroke-width="1.4"/>
+            <text x="117" y="88" text-anchor="middle" class="t-ink" font-size="17">87</text>
+            <text x="267" y="88" text-anchor="middle" class="t-ink" font-size="17">263 large</text>
+            <text x="390" y="88" class="t-creator" font-size="17">75% large</text>
+          </g>
+          <g data-step="2" class="dk-rise">
+            <text x="66" y="157" text-anchor="end" class="t-teal" font-size="20">B</text>
+            <rect x="80" y="130" width="231.4" height="40" rx="3" class="f-soft s-muted" stroke-width="1.4"/>
+            <rect x="311.4" y="130" width="68.6" height="40" rx="3" class="f-creator-soft s-creator" stroke-width="1.4"/>
+            <text x="195" y="156" text-anchor="middle" class="t-ink" font-size="17">270 small</text>
+            <text x="345" y="156" text-anchor="middle" class="t-ink" font-size="17">80</text>
+            <text x="390" y="156" class="t-creator" font-size="17">23% large</text>
+          </g>
+          <text x="230" y="204" text-anchor="middle" class="t-faint" font-size="15">350 patients each</text>
+        </svg>
+      </figure>
+      <p class="dk-take" data-step="3">Large stones are harder for both, and A treated three times as many.</p>
+      <p class="dk-note" data-step="3">Each total is an average of the two group rates, weighted by this mix: A's total leans on its 73%, B's on its 87%.</p>
+    </div>
+  </section>
+
+  <!-- 6 Try it: move A's mix -->
+  <section class="dk-slide" data-label="Try it">
+    <div class="dk-inner">
+      <h2 class="dk-h">Move A's mix and watch its total</h2>
+      <figure class="dk-fig" style="max-width:720px">
+        <svg viewBox="0 0 520 200" role="img" aria-label="A's total success rate for the chosen mix, next to B's" id="mix-chart">
+          <text x="20" y="28" class="t-ink" font-size="20">All patients</text>
+          <text x="420" y="28" text-anchor="end" class="t-muted" font-size="15">success rate</text>
+          <path class="ln-thin s-line" d="M80 46 V166 H420"/>
+          <path class="ln-thin s-faint" d="M420 166 V174"/>
+          <text x="420" y="188" text-anchor="middle" class="t-faint" font-size="15">100%</text>
+          <text x="66" y="83" text-anchor="end" class="t-people" font-size="20">A</text>
+          <rect id="mix-a" class="f-people" x="80" y="58" width="265.2" height="36" rx="3"/>
+          <text id="mix-a-val" x="353" y="83" class="t-people" font-size="19">78%</text>
+          <text x="66" y="141" text-anchor="end" class="t-teal" font-size="20">B</text>
+          <rect class="f-teal" x="80" y="116" width="280.7" height="36" rx="3"/>
+          <text x="368" y="141" class="t-teal" font-size="19">83%</text>
+          <text x="80" y="188" class="t-faint" font-size="15">B: the study's mix (23% large)</text>
+        </svg>
+      </figure>
+      <div class="dk-ctl" data-interactive>
+        <label for="mix-share">share of large stones among A's patients</label>
+        <input id="mix-share" type="range" min="0" max="100" step="1" value="75" aria-label="Share of large stones among A's patients">
+        <strong id="mix-share-val" class="c-creator">75%</strong>
+        <span role="group" aria-label="Preset mixes" id="mix-presets">
+          <button type="button" class="dk-btn" data-share="75" aria-pressed="true">As in the study</button>
+          <button type="button" class="dk-btn" data-share="23" aria-pressed="false">Same mix as B</button>
+        </span>
+      </div>
+      <p class="dk-take" id="mix-verdict">A's group rates never change; only the mix does. Here B looks better.</p>
+      <p class="dk-note">Computed from the study's group rates: A's total = 93.1% × (1 − share) + 73.0% × share. It drops below B's 83% once more than about 52% of A's patients have large stones.</p>
+    </div>
+  </section>
+
+  <!-- 7 The fair comparison -->
+  <section class="dk-slide" data-label="Same patients">
+    <div class="dk-inner">
+      <h2 class="dk-h">Give both the same patients, and A comes out ahead</h2>
+      <figure class="dk-fig" style="max-width:720px">
+        <svg viewBox="0 0 520 210" role="img" aria-label="Same mix for both: A 83 percent, B 78 percent (computed)">
+          <text x="20" y="28" class="t-ink" font-size="20">Same mix for both</text>
+          <text x="420" y="28" text-anchor="end" class="t-muted" font-size="15">51% small, 49% large</text>
+          <path class="ln-thin s-line" d="M80 46 V166 H420"/>
+          <path class="ln-thin s-faint" d="M420 166 V174"/>
+          <text x="420" y="188" text-anchor="middle" class="t-faint" font-size="15">100%</text>
+          <g data-step="1">
+            <text x="66" y="83" text-anchor="end" class="t-people" font-size="20">A</text>
+            <rect class="f-people dk-grow" x="80" y="58" width="283.1" height="36" rx="3"/>
+            <text x="371" y="83" class="t-people" font-size="19">83%</text>
+            <text x="66" y="141" text-anchor="end" class="t-teal" font-size="20">B</text>
+            <rect class="f-teal dk-grow" x="80" y="116" width="264.8" height="36" rx="3" style="transition-delay:.08s"/>
+            <text x="353" y="141" class="t-teal" font-size="19">78%</text>
+          </g>
+          <text x="80" y="188" class="t-faint" font-size="15">computed</text>
+        </svg>
+      </figure>
+      <p class="dk-take" data-step="2">On the same mix of patients A is ahead by 5 points, as it is within each group.</p>
+      <p class="dk-note" data-step="2">Computed: each treatment's group rates weighted by the mix of all 700 patients (357 small, 343 large stones). This assumes stone size is what drove both the choice of treatment and the outcome.</p>
+    </div>
+  </section>
+
+  <!-- 8 Takeaways -->
+  <section class="dk-slide" data-label="Takeaways">
+    <div class="dk-inner">
+      <h2 class="dk-h">Read a total with its mix in mind</h2>
+      <ol class="dk-list">
+        <li data-step="1" data-dim="2" class="dk-rise"><span class="n">1</span><span class="t">Totals mix two things</span><span class="d">How well a treatment works, and who received it.</span></li>
+        <li data-step="2" data-dim="3" class="dk-rise"><span class="n">2</span><span class="t">Split by what drove the choice</span><span class="d">When a factor shapes both who gets what and how it turns out, compare within its groups.</span></li>
+        <li data-step="3" class="dk-rise"><span class="n">3</span><span class="t">Not every split is the right one</span><span class="d">Do not split by something the treatment itself changes; the causal story decides.</span></li>
+      </ol>
+      <p class="dk-note" data-step="3"><a href="https://en.wikipedia.org/wiki/Simpson%27s_paradox" target="_blank" rel="noopener">Simpson's paradox</a> · <a href="https://doi.org/10.1136/bmj.292.6524.879" target="_blank" rel="noopener">the 1986 study</a></p>
+    </div>
+  </section>
+</main>
+
+<nav class="dk-nav" aria-label="Slides">
+  <button type="button" data-dk-prev aria-label="Previous">←</button>
+  <span class="dk-dots" aria-hidden="true"></span>
+  <span data-dk-count aria-live="polite"></span>
+  <button type="button" data-dk-next aria-label="Next">→</button>
+</nav>
+
+<script>
+/* "Try it": A's total success rate for a chosen share of large stones.
+   Data: the study's group rates (81 of 87 small, 192 of 263 large for A; B overall 289 of 350 at its own mix). */
+document.addEventListener("DOMContentLoaded", function () {
+  var RATE_SMALL = 81 / 87, RATE_LARGE = 192 / 263, B_TOTAL = 289 / 350;
+  var X0 = 80, FULL = 340;
+  var input = document.getElementById("mix-share");
+  if (!input) return;
+  var bar = document.getElementById("mix-a"), val = document.getElementById("mix-a-val");
+  var shown = document.getElementById("mix-share-val"), verdict = document.getElementById("mix-verdict");
+  var buttons = document.querySelectorAll("#mix-presets [data-share]");
+  function draw(share) {
+    var s = share / 100, a = RATE_SMALL * (1 - s) + RATE_LARGE * s, w = FULL * a;
+    bar.setAttribute("width", w.toFixed(1));
+    val.setAttribute("x", (X0 + w + 8).toFixed(1));
+    val.textContent = Math.round(a * 100) + "%";
+    shown.textContent = share + "%";
+    var gap = Math.round(a * 100) - Math.round(B_TOTAL * 100);
+    verdict.textContent = "A's group rates never change; only the mix does. " +
+      (gap > 0 ? "Here A looks better." : gap < 0 ? "Here B looks better." : "Here they look the same.");
+    buttons.forEach(function (b) { b.setAttribute("aria-pressed", String(Number(b.dataset.share) === share)); });
+  }
+  input.addEventListener("input", function () { draw(Number(input.value)); });
+  buttons.forEach(function (b) {
+    b.addEventListener("click", function () { input.value = b.dataset.share; draw(Number(b.dataset.share)); });
+  });
+  draw(Number(input.value));
+});
+</script>
+</body>
+</html>

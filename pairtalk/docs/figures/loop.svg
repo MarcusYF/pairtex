@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 414" width="960" height="414" role="img" aria-label="The PairTalk loop: you comment on a slide and click, the agent fixes the slide and the script and replies, the fix and the reply show in the talk, and every round teaches your talk-style guide">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#232323} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6B6B6B"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#C6952C"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6D5398"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#27709C"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#227828"/></marker></defs>
+<circle cx="22" cy="14" r="11" fill="#C6952C"/><text x="22" y="19.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">1</text>
+<text x="40" y="20" font-size="17" class="b" style="fill:#27709C">You comment on a slide</text>
+<circle cx="352" cy="14" r="11" fill="#C6952C"/><text x="352" y="19.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">2</text>
+<text x="370" y="20" font-size="17" class="b" style="fill:#6D5398">The agent fixes it</text>
+<circle cx="662" cy="14" r="11" fill="#C6952C"/><text x="662" y="19.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">3</text>
+<text x="680" y="20" font-size="17" class="b">The fix and the reply land</text>
+<rect x="10" y="34" width="292" height="250" rx="8" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="1.6"/><path d="M10,42 a8,8 0 0 1 8,-8 h276 a8,8 0 0 1 8,8 v22 h-292 Z" fill="#F1F1EE"/><circle cx="27" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="42" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="57" cy="49" r="4.5" fill="#D9D9D9"/><text x="76" y="54" font-size="15" class="m" style="fill:#6B6B6B">localhost · mytalk</text>
+<rect x="64" y="76" width="150" height="8" rx="4" fill="#E4E4E1"/><path d="M44,102 V204 H244" stroke="#6B6B6B" stroke-width="1.6" fill="none"/><path d="M46,110 L230,140" stroke="#C6952C" stroke-width="2.4" stroke-dasharray="7 5" fill="none"/><path d="M46,110 L74,132 L100,142 L128,160 L156,168 L186,184 L226,194" stroke="#27709C" stroke-width="2.4" fill="none"/>
+<rect x="168" y="94" width="94" height="44" rx="3" fill="#E3F1EF" fill-opacity="0.6" stroke="#25887E" stroke-width="2"/>
+<rect x="22" y="212" width="268" height="62" rx="6" fill="#EAF2F8"/>
+<text x="32" y="233" font-size="15" style="fill:#27709C"><tspan class="b">Ada</tspan> · slide 8, click 2, box</text>
+<text x="32" y="255" font-size="15">What does the dashed line</text>
+<text x="32" y="271" font-size="15">guarantee? Say it in words.</text>
+<path d="M306,159 L334,159" stroke="#6B6B6B" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<rect x="340" y="62" width="282" height="196" rx="8" fill="#F3EEF8" stroke="#6D5398" stroke-width="1.8"/>
+<text x="481" y="91" font-size="17.5" class="b" text-anchor="middle" style="fill:#6D5398">Your agent + pairtalk</text>
+<text x="481" y="111" font-size="14.5" text-anchor="middle" style="fill:#6B6B6B">(Claude Code, Codex, …)</text>
+<circle cx="358" cy="136" r="3.5" fill="#6D5398"/><text x="370" y="141" font-size="15">gets the slide, click and box</text>
+<circle cx="358" cy="160" r="3.5" fill="#6D5398"/><text x="370" y="165" font-size="15">reads your talk style</text>
+<circle cx="358" cy="184" r="3.5" fill="#6D5398"/><text x="370" y="189" font-size="15">edits the slide and the script</text>
+<circle cx="358" cy="208" r="3.5" fill="#6D5398"/><text x="370" y="213" font-size="15">screenshots every click</text>
+<circle cx="358" cy="232" r="3.5" fill="#6D5398"/><text x="370" y="237" font-size="15">replies under your comment</text>
+<path d="M626,159 L652,159" stroke="#6B6B6B" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<rect x="658" y="34" width="292" height="250" rx="8" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="1.6"/><path d="M658,42 a8,8 0 0 1 8,-8 h276 a8,8 0 0 1 8,8 v22 h-292 Z" fill="#F1F1EE"/><circle cx="675" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="690" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="705" cy="49" r="4.5" fill="#D9D9D9"/><text x="724" y="54" font-size="15" class="m" style="fill:#6B6B6B">localhost · mytalk</text>
+<rect x="712" y="76" width="150" height="8" rx="4" fill="#E4E4E1"/><path d="M692,102 V204 H892" stroke="#6B6B6B" stroke-width="1.6" fill="none"/><path d="M694,110 L878,140" stroke="#C6952C" stroke-width="2.4" stroke-dasharray="7 5" fill="none"/><path d="M694,110 L722,132 L748,142 L776,160 L804,168 L834,184 L874,194" stroke="#27709C" stroke-width="2.4" fill="none"/><text x="878" y="128" font-size="15" text-anchor="end" style="fill:#C6952C">guarantee</text>
+<rect x="670" y="212" width="268" height="62" rx="6" fill="#EDF5EC"/>
+<text x="680" y="233" font-size="15" style="fill:#227828"><tspan class="b">Reply</tspan> · done</text>
+<text x="680" y="255" font-size="15" style="fill:#227828">Labelled it “guarantee”; the</text>
+<text x="680" y="271" font-size="15" style="fill:#227828">script says why it is loose.</text>
+<rect x="340" y="318" width="282" height="64" rx="8" fill="#FBF6E9" stroke="#C6952C" stroke-width="1.8"/>
+<circle cx="360" cy="337" r="11" fill="#C6952C"/><text x="360" y="342.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">4</text>
+<text x="378" y="343" font-size="17.5" class="b" style="fill:#8A6410">Your talk style</text>
+<text x="360" y="368" font-size="14.5">STYLE.md: plain text, in git</text>
+<path d="M804,288 C804,340 720,350 626,350" stroke="#C6952C" stroke-width="2.4" fill="none" marker-end="url(#ag)"/>
+<path d="M156,288 C156,340 240,350 336,350" stroke="#C6952C" stroke-width="2.4" fill="none" marker-end="url(#ag)"/>
+<path d="M481,316 L481,262" stroke="#6D5398" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ap)"/>
+<text x="472" y="296" font-size="14.5" text-anchor="end" style="fill:#6D5398">read before every slide</text>
+<text x="950" y="381" font-size="14.5" text-anchor="end" style="fill:#8A6410">what you keep, rewrite or undo</text>
+<text x="12" y="381" font-size="14.5" style="fill:#8A6410">what you say “always” about</text>
+<text x="950" y="406" font-size="14.5" text-anchor="end" style="fill:#6B6B6B">Coauthors comment too: fixed and answered, never learned.</text>
+</svg>

@@ -1,0 +1,21 @@
+{
+  "name": "pairtalk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Talk slides and a speaker script that a coding agent fixes from comments, and learns the author's talk style.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "python3 tests/test_e2e.py && node cloudflare/tests/smoke.mjs",
+    "test:site": "node cloudflare/tests/smoke.mjs",
+    "figures": "python3 docs/figures/make_figures.py",
+    "screens": "node docs/img/make_screens.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "acorn": "^8.15.0",
+    "playwright": "^1.56.0"
+  }
+}

@@ -1,0 +1,3567 @@
+#!/usr/bin/env python3
+"""pairtex (PairTeX): pair-write a LaTeX paper with a coding agent, one comment at a time.
+
+The author writes `%! ...` (change this) and `%? ...` (a question) comments in the LaTeX source, in Overleaf or in a local
+editor. `pairtex watch` polls the paper (an Overleaf project through its git bridge, any git remote, or a local folder), waits
+until a comment ends with "..", prints the batch and exits. That exit wakes the agent that started the watcher in the
+background. The agent edits its own checkout, answers each comment with `pairtex resolve`, publishes with `pairtex push`, learns
+from the writing-style evidence in the batch, and starts `pairtex watch` again.
+
+Comment syntax in the .tex source (full syntax: README.md):
+  %! make this paragraph tighter..      a change request; it is sent once it ends with ".." (it may run on over % lines)
+  %? why "anchored" here?..             a question: the agent answers and changes no text
+  ... [[one sentence]] ... %! too long.. [[ ]] marks the part of the paragraph a comment is about
+  \\claude{c7}{make this ...}{Cut ...}   once handled: a green note in the PDF with the comment and the reply
+  %!c7 ... / %!c7> ...                  the same thread kept in % lines where a note cannot go (maths, tables, captions)
+The author deletes the note (or the thread's lines) to accept, or writes a new %! or %? line under it to follow up.
+`%@` (version 0.1) still works as a change request.
+
+Data (profile, style vault, projects) lives in $PAIRTEX_HOME, else ~/.pairtex (`pairtex setup`), else ~/.overleaf-writer
+(0.4.0), else, for installs from before 0.4, next to this script (`pairtex migrate` moves it out). `pairtex paths` prints
+where. `ow` is the command's old name and still works.
+
+Standard library only (Python 3.9+), plus git and, for the compile check, latexmk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import datetime as dt
+import difflib
+import fcntl
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import io
+import time
+from pathlib import Path
+
+VERSION = "0.5.0"
+APP = Path(__file__).resolve().parent.parent
+TEMPLATES = APP / "templates"
+DEFAULT_HOME = Path.home() / ".pairtex"
+OLD_HOME = Path.home() / ".overleaf-writer"  # 0.4.0, before the project was named PairTeX
+
+
+def home_env() -> str:
+    return os.environ.get("PAIRTEX_HOME") or os.environ.get("OW_HOME") or ""
+
+
+def data_home() -> Path:
+    """$PAIRTEX_HOME ($OW_HOME), else ~/.pairtex, else ~/.overleaf-writer, else (the layout before 0.4) the folder
+    this script lives in."""
+    env = home_env()
+    if env:
+        return Path(env).expanduser()
+    for home in (DEFAULT_HOME, OLD_HOME):
+        if home.exists():
+            return home.resolve()
+    return APP
+
+
+DATA = data_home()
+PROFILE_PATH = DATA / "profile.json"
+
+
+def load_profile() -> dict:
+    if not PROFILE_PATH.exists():
+        return {}
+    try:
+        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        sys.exit(f"pairtex: {PROFILE_PATH} is not valid JSON: {exc}")
+
+
+PROFILE = load_profile()
+
+
+def vault_dir() -> Path:
+    """The style vault: the profile's "vault", else vault/ in the data home (style/ in the layout before 0.4)."""
+    v = PROFILE.get("vault")
+    if v:
+        p = Path(v).expanduser()
+        return p if p.is_absolute() else DATA / p
+    if (DATA / "vault").exists() or not (DATA / "style").exists():
+        return DATA / "vault"
+    return DATA / "style"
+
+
+PROJECTS = DATA / "projects"
+STYLE_DIR = vault_dir()
+STYLE_MD = STYLE_DIR / "STYLE.md"
+EVIDENCE = STYLE_DIR / "evidence.jsonl"
+AGENT = PROFILE.get("agent", "Claude")
+WEB_MESSAGE = "Update on Overleaf."    # Overleaf's commits for edits made in its web editor
+FOLDER_MESSAGE = "Update in editor."    # the folder backend's commits for edits saved in a local editor
+OW_PREFIX = "pairtex:"                  # the loop's own commits
+OW_PREFIXES = (OW_PREFIX, "overleaf-writer:")  # and their name before 0.4.1
+TRAILER = PROFILE.get("trailer", "Co-Authored-By: Claude <noreply@anthropic.com>" if AGENT == "Claude" else "")
+GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "LC_ALL": "C"}
+
+EXIT_BATCH, EXIT_NOTHING, EXIT_REMOTE, EXIT_CONFLICT, EXIT_BUSY, EXIT_LOCKED, EXIT_COMPILE, EXIT_GUARD = 0, 1, 2, 3, 4, 5, 6, 7
+
+
+def mask_url(text: str) -> str:
+    """Never echo a credential embedded in a URL."""
+    return re.sub(r"(https?://)[^@\s/]+@", r"\1***@", text or "")
+
+
+def first_word(name: str) -> str:
+    return (name or "").split()[0] if (name or "").split() else ""
+
+
+class OwError(Exception):
+    def __init__(self, message: str, code: int = 1):
+        super().__init__(message)
+        self.code = code
+
+
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def short(sha: str | None) -> str:
+    return (sha or "-------")[:7]
+
+
+def sha1(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------------------------- git
+
+class GitError(OwError):
+    pass
+
+
+def git(repo: Path, *args: str, check: bool = True, timeout: int = 180, input_text: str | None = None,
+        extra_env: dict | None = None) -> str:
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    env.update(extra_env or {})
+    try:
+        proc = subprocess.run(["git", *args], cwd=str(repo), env=env, input=input_text, capture_output=True,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"git {' '.join(args[:2])} timed out after {timeout}s") from exc
+    if check and proc.returncode != 0:
+        msg = mask_url((proc.stderr or proc.stdout).strip())
+        raise GitError(f"git {' '.join(a for a in args[:3] if not a.startswith('--git-dir'))} failed: {msg}")
+    return proc.stdout
+
+
+def git_bytes(repo: Path, *args: str) -> bytes:
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    proc = subprocess.run(["git", *args], cwd=str(repo), env=env, capture_output=True, timeout=180)
+    if proc.returncode != 0:
+        raise GitError(f"git {' '.join(args[:2])} failed: {mask_url(proc.stderr.decode('utf-8', 'replace').strip())}")
+    return proc.stdout
+
+
+def git_ok(repo: Path, *args: str) -> bool:
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    return subprocess.run(["git", *args], cwd=str(repo), env=env, capture_output=True).returncode == 0
+
+
+def remote_head(p: "Project") -> str:
+    """The head of the paper's source of truth. For a folder, take a snapshot of the folder first."""
+    if p.backend == "folder":
+        return folder_sync_in(p)
+    out = git(p.repo, "ls-remote", p.remote, f"refs/heads/{p.branch}", timeout=60)
+    for line in out.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == f"refs/heads/{p.branch}":
+            return sha.strip()
+    raise GitError(f"the remote has no branch {p.branch}")
+
+
+def head(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
+def tree_of(repo: Path, rev: str) -> str:
+    return git(repo, "rev-parse", f"{rev}^{{tree}}").strip()
+
+
+def is_ancestor(repo: Path, a: str, b: str) -> bool:
+    return git_ok(repo, "merge-base", "--is-ancestor", a, b)
+
+
+def dirty(repo: Path) -> list[str]:
+    return [l for l in git(repo, "status", "--porcelain", "--untracked-files=all").splitlines() if l.strip()]
+
+
+def stage_tree(repo: Path) -> str:
+    """Stage every change in the checkout and return the index's tree id."""
+    git(repo, "add", "-A")
+    return git(repo, "write-tree").strip()
+
+
+def file_at(repo: Path, rev: str, path: str) -> str | None:
+    if not git_ok(repo, "cat-file", "-e", f"{rev}:{path}"):
+        return None
+    return git(repo, "show", f"{rev}:{path}")
+
+
+def changed_files(repo: Path, a: str, b: str) -> list[str]:
+    out = git(repo, "diff", "--name-only", "-z", a, b)
+    return [p for p in out.split("\0") if p]
+
+
+# ------------------------------------------------------------------------------------ project, state
+
+BACKEND_LABEL = {"overleaf": "Overleaf", "git": "the remote", "folder": "the folder"}
+
+
+class Project:
+    def __init__(self, slug: str):
+        global ID_PREFIXES
+        self.slug = slug
+        self.dir = PROJECTS / slug
+        cfg_path = self.dir / "project.json"
+        if not cfg_path.exists():
+            known = ", ".join(sorted(p.name for p in PROJECTS.iterdir() if (p / "project.json").exists())) \
+                if PROJECTS.exists() else ""
+            raise OwError(f"no project '{slug}' in {PROJECTS} (known: {known or 'none'}). Create it with: "
+                          f"pairtex init {slug} --overleaf ID (or --git URL, or --folder DIR)")
+        self.cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        self.repo = self.dir / "repo"
+        self.state_path = self.dir / "state.json"
+        self.lock_path = self.dir / "watch.lock"
+        self.build = self.dir / "build"
+        self.branch = self.cfg.get("branch", "master")
+        self.main = self.cfg.get("main")
+        self.watch = self.cfg.get("watch", ["*.tex"])
+        self.macros = self.cfg.get("protected_macros", [])
+        self.owner = self.cfg.get("owner_name", "")
+        self.interval = float(self.cfg.get("interval", 8))
+        self.settle = float(self.cfg.get("settle", 12))
+        # ".." : a comment is sent once it ends with "..". None: once it has not changed for `settle` seconds (0.1 rule).
+        self.terminator = self.cfg.get("terminator")
+        # "visible": a handled comment becomes a \claude{...} note in the PDF. "source": it stays in % lines.
+        self.notes = self.cfg.get("notes", "source")
+        # Where the paper lives: "overleaf" (git bridge), "git" (any remote), "folder" (a local folder an editor saves into).
+        self.backend = self.cfg.get("backend", "overleaf")
+        self.remote = self.cfg.get("remote_name", "overleaf")
+        self.folder = Path(self.cfg["folder"]).expanduser() if self.cfg.get("folder") else None
+        self.label = BACKEND_LABEL.get(self.backend, "the remote")
+        # Comment ids: this loop's prefix (c7), and the prefixes of coauthors' loops on the same paper.
+        self.prefix = self.cfg.get("id_prefix", "c")
+        ID_PREFIXES = [self.prefix] + [x for x in self.cfg.get("coauthor_prefixes", []) if x != self.prefix]
+        # Who the loop answers: the owner, and coauthors listed in comments_from ({"Name": "Handle"} or ["Name"]).
+        cf = self.cfg.get("comments_from", {})
+        self.comments_from = {n: first_word(n) for n in cf} if isinstance(cf, list) else dict(cf)
+        if self.cfg.get("owner_handle"):
+            self.handle = self.cfg["owner_handle"]
+        elif PROFILE.get("handle") and (not PROFILE.get("name") or PROFILE.get("name") == self.owner):
+            self.handle = PROFILE["handle"]
+        else:
+            self.handle = first_word(self.owner) or "Author"
+
+    def handle_for(self, author: str | None) -> str:
+        if not author or author == self.owner:
+            return self.handle
+        return self.comments_from.get(author) or first_word(author) or author
+
+    def answers(self, author: str | None) -> bool:
+        """Does this loop handle a comment written by `author`? Without a known owner, it handles every comment."""
+        return not self.owner or not author or author == self.owner or author in self.comments_from
+
+    def is_author_edit(self, subject: str) -> bool:
+        """Is a commit (not one of the loop's own) the author's writing rather than a push by a tool?"""
+        subject = subject.strip()
+        if self.backend == "overleaf":
+            return subject == WEB_MESSAGE
+        if self.backend == "folder":
+            return subject == FOLDER_MESSAGE
+        return not subject.startswith(OW_PREFIXES)
+
+    def where(self) -> str:
+        if self.backend == "folder":
+            return str(self.folder)
+        return mask_url(self.cfg.get("web_url") or self.cfg.get("remote_url", ""))
+
+    def watched(self, path: str) -> bool:
+        return any(fnmatch.fnmatch(path, pat) for pat in self.watch)
+
+    def tex_files(self) -> list[str]:
+        out = git(self.repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+        return sorted(p for p in out.split("\0") if p and self.watched(p) and (self.repo / p).is_file())
+
+    def read(self, path: str) -> str:
+        return (self.repo / path).read_text(encoding="utf-8", errors="replace")
+
+
+def empty_state() -> dict:
+    return {"next_id": 1, "remote_head": None, "comments": {}, "drafts": {}, "pending_events": [],
+            "window_commit": None, "checkpoint": None, "batch_threads": [], "ours": [], "ours_paras": {},
+            "last_merged": None, "others": {}}
+
+
+def load_state(p: Project) -> dict:
+    if p.state_path.exists():
+        st = json.loads(p.state_path.read_text(encoding="utf-8"))
+        for k, v in empty_state().items():
+            st.setdefault(k, v)
+        return st
+    return empty_state()
+
+
+def save_state(p: Project, st: dict) -> None:
+    tmp = p.state_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p.state_path)
+
+
+# ------------------------------------------------------------------------------------- watch lock
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def lock_owner(p: Project) -> dict | None:
+    if not p.lock_path.exists():
+        return None
+    try:
+        info = json.loads(p.lock_path.read_text())
+    except (OSError, ValueError):
+        return None
+    return info if pid_alive(int(info.get("pid", 0))) else None
+
+
+def acquire_lock(p: Project, takeover: bool) -> None:
+    owner = lock_owner(p)
+    if owner and owner["pid"] != os.getpid():
+        if not takeover:
+            raise OwError(f"another watcher is running for {p.slug} (pid {owner['pid']}, since {owner['started']}). "
+                          f"Stop it, or pass --takeover to stop it and watch here.", EXIT_LOCKED)
+        os.kill(int(owner["pid"]), signal.SIGTERM)
+        for _ in range(50):
+            if not pid_alive(int(owner["pid"])):
+                break
+            time.sleep(0.1)
+    p.lock_path.write_text(json.dumps({"pid": os.getpid(), "started": now_iso()}))
+
+    def release(*_):
+        try:
+            info = json.loads(p.lock_path.read_text())
+            if info.get("pid") == os.getpid():
+                p.lock_path.unlink()
+        except (OSError, ValueError):
+            pass
+
+    atexit.register(release)
+
+    def on_signal(signum, _frame):
+        release()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+
+def ensure_not_watching(p: Project) -> None:
+    owner = lock_owner(p)
+    if owner:
+        raise OwError(f"a watcher is running for {p.slug} (pid {owner['pid']}). Edits happen between watcher runs: "
+                      f"stop it first, or wait for its batch.", EXIT_LOCKED)
+
+
+# --------------------------------------------------------------------------------- TeX source model
+
+def comment_index(line: str) -> int:
+    """Index of the first unescaped % in a TeX source line, or -1."""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "%":
+            return i
+        i += 1
+    return -1
+
+
+ID_PREFIXES = ["c"]  # this loop's comment-id prefix first, then coauthors' loops' (set by Project)
+THREAD_ID = re.compile(r"([a-z]{1,8})(\d+)(>?)(?=\s|$)")
+MARKS = "!?@"  # %! change request, %? question (answer only), %@ change request (0.1 syntax)
+MAGIC = re.compile(r"!\s*(TEX|BIB)\b", re.I)  # %!TEX program = ... editor magic comments are not requests
+
+
+def id_num(cid: str) -> int:
+    m = re.search(r"\d+$", cid or "")
+    return int(m.group()) if m else 0
+
+
+def own_id(cid: str | None) -> bool:
+    """An id this loop issued (its prefix), not a coauthor's loop's."""
+    return bool(cid) and re.sub(r"\d+$", "", cid) == ID_PREFIXES[0]
+
+
+def parse_marker(line: str, known: list[str] | None = None) -> dict | None:
+    """A %!, %? or %@ marker: an open comment, or a thread line (%!c7 …) or reply (%!c7> …) of a handled one.
+
+    A thread id with an unknown prefix belongs to another loop on the same paper ("foreign"), unless the line ends with
+    the ".." that only the author types: then it is the author's comment that starts with a word like "v2"."""
+    k = comment_index(line)
+    if k < 0 or k + 1 >= len(line) or line[k + 1] not in MARKS:
+        return None
+    mark = line[k + 1]
+    if mark == "!" and MAGIC.match(line[k + 1:]):
+        return None
+    rest = line[k + 2:]
+    full = line[:k].strip() == ""
+    m = THREAD_ID.match(rest)
+    if m:
+        own = m.group(1) in (ID_PREFIXES if known is None else known)
+        if own or not TERM_RE.search(rest):
+            return {"kind": "reply" if m.group(3) else "thread", "cid": m.group(1) + m.group(2),
+                    "text": rest[m.end():].strip(), "full": full, "col": k, "mark": mark, "foreign": not own}
+    return {"kind": "open", "cid": None, "text": rest.strip(), "full": full, "col": k, "mark": mark}
+
+
+def kind_of(mark: str) -> str:
+    return "question" if mark == "?" else "edit"
+
+
+TERM_RE = re.compile(r"(?<!\.)\.\.\s*$")  # ".." ends a comment; "..." (an ellipsis) does not
+# In a comment typed mid-line, the first ".." (not "...", not "../") ends it even when the author writes on after it: the words
+# after it are prose that LaTeX hides until `pairtex resolve` puts them back.
+MID_TERM = re.compile(r"(?<!\.)\.\.(?=[\s,;:!?)\]}]|$)")
+
+
+def join_prose(code: str, tail: str) -> str:
+    """The code part of a line with prose words appended (no space before punctuation)."""
+    code, tail = code.rstrip(), tail.strip()
+    if not tail:
+        return code
+    if not code:
+        return tail
+    return code + ("" if tail[0] in ",.;:!?)]}'" else " ") + tail
+NOTE_RE = re.compile(r"\\claude\s*(?:\[[^\]\n]*\]\s*)?\{([a-z]{1,8}\d+)\}")
+NOTE_HANDLE = re.compile(r"\\claude\s*\[([^\]\n]*)\]")
+# The macro's definition: 4 arguments since 0.4 (an optional handle, then id, comment, reply); 3 before.
+DEF_RE = re.compile(r"\\(?:provide|new|renew)command\*?\s*\{?\\claude\}?\s*\[(\d)\](?:\[([^\]]*)\])?")
+DEF_HEAD = "% PairTeX:"
+DEF_HEADS = (DEF_HEAD, "% overleaf-writer:")  # the note block's first line, now and before 0.4.1
+HIDE_LINE = "% \\def\\hideclaudenotes{}  % delete the first % on this line to hide every note in the PDF"
+
+
+def note_def(handle: str, agent: str) -> list[str]:
+    return [f"{DEF_HEAD} handled comments with {agent}'s replies, in green until the commenter deletes the line.",
+            HIDE_LINE,
+            "\\usepackage{xcolor}",
+            "\\providecolor{claudecol}{RGB}{34,120,40}",
+            f"\\providecommand{{\\claude}}[4][{handle}]{{\\ifdefined\\hideclaudenotes\\else{{\\leavevmode"
+            f"\\color{{claudecol}}\\small[#2]\\ \\textbf{{#1:}} #3\\quad\\textbf{{{agent}:}} #4}}\\fi}}"]
+
+
+def code_part(line: str) -> str:
+    k = comment_index(line)
+    return line if k < 0 else line[:k]
+
+
+def note_ids(line: str) -> list[str]:
+    return NOTE_RE.findall(code_part(line))
+
+
+def is_note_line(line: str) -> bool:
+    m = NOTE_RE.search(code_part(line))
+    return bool(m and code_part(line)[:m.start()].strip() == "")
+
+
+def strip_notes(text: str) -> str:
+    """Remove \\claude[Handle]{cN}{...}{...} notes (the id, then two brace groups) from TeX source."""
+    out, i = [], 0
+    while True:
+        m = NOTE_RE.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        j = m.end()
+        for _ in range(2):
+            while j < len(text) and text[j] in " \t\n":
+                j += 1
+            if j >= len(text) or text[j] != "{":
+                break
+            depth, j = 1, j + 1
+            while j < len(text) and depth:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                depth += text[j] == "{"
+                depth -= text[j] == "}"
+                j += 1
+        i = j
+    return "".join(out)
+
+
+OK_CHARS = set("“”‘’–—…•")
+UNICODE_TEX = {"→": "$\\to$", "←": "$\\leftarrow$", "≤": "$\\le$", "≥": "$\\ge$", "×": "$\\times$", "≈": "$\\approx$",
+               "≠": "$\\ne$", "∞": "$\\infty$", "±": "$\\pm$", "α": "$\\alpha$", "β": "$\\beta$", "γ": "$\\gamma$",
+               "λ": "$\\lambda$", "η": "$\\eta$", "τ": "$\\tau$", "μ": "$\\mu$", "π": "$\\pi$", "σ": "$\\sigma$",
+               "κ": "$\\kappa$", "ε": "$\\varepsilon$", "Ψ": "$\\Psi$", "·": "$\\cdot$"}
+
+
+CJK_RANGES = [(0x3000, 0x303F), (0x3040, 0x30FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xAC00, 0xD7AF), (0xF900, 0xFAFF),
+              (0xFF00, 0xFFEF)]
+
+
+def renderable(text: str, cjk: bool = False) -> bool:
+    """Can the engine print this? pdfLaTeX: Latin-1 and a few typographic marks. XeLaTeX or LuaLaTeX with a CJK
+    package: CJK text too."""
+    def ok(ch: str) -> bool:
+        if ord(ch) < 0x100 or ch in OK_CHARS:
+            return True
+        return cjk and any(a <= ord(ch) <= b for a, b in CJK_RANGES)
+    return all(ok(ch) for ch in text)
+
+
+TEXT_COMMANDS = {"Cref", "cref", "ref", "eqref", "cite", "citet", "citep", "emph", "textbf", "textit", "texttt", "textsf",
+                 "S", "ldots", "dots", "textbackslash", "url", "footnote", "todo", "placeholder"}
+
+
+def mathy(extra: tuple = ()) -> re.Pattern:
+    """A word that is maths: a command other than a text command (or a protected note macro), or a one-letter
+    variable with a sub- or superscript."""
+    names = "|".join(sorted(TEXT_COMMANDS | set(extra)))
+    return re.compile(r"\\(?!(?:%s)\b)[A-Za-z]+|^[A-Za-z](?:_|\^)(?:\{[^}]*\}|[A-Za-z0-9])" % names)
+
+
+def wrap_math(text: str, keep: tuple = ()) -> str:
+    """Authors write maths without dollars ("a_t=P\\mu_t"). Outside $...$, wrap a word in $...$ when it holds a maths
+    command or is a one-letter variable with a sub- or superscript; identifiers like more_x stay text."""
+    pat = mathy(keep)
+    parts = re.split(r"((?<!\\)\$[^$]*(?<!\\)\$)", text)
+    out = []
+    for n, part in enumerate(parts):
+        if n % 2 or "$" in part:
+            out.append(part)
+            continue
+        words = []
+        for w in re.split(r"(\s+)", part):
+            m = re.match(r"^([(\[]*)(.*?)([.,;:!?)\]]*)$", w, re.S)
+            lead, core, trail = m.groups() if m else ("", w, "")
+            if core and not w.isspace() and pat.search(core):
+                words.append(f"{lead}${core}${trail}")
+            else:
+                words.append(w)
+        out.append("".join(words))
+    return "".join(out)
+
+
+def tex_text(text: str, keep: tuple = (), source: bool = False) -> str:
+    """Make free text safe as a LaTeX macro argument: keep $math$ and \\commands{...}, wrap bare maths in $...$,
+    escape the special characters elsewhere, turn "straight quotes" into ``TeX quotes'', and neutralise unbalanced $ or
+    braces. A ~ before a command (Prop.~\\ref) is a tie; with source=True (words quoted from the paper's source) every ~ is."""
+    text = wrap_math("".join(UNICODE_TEX.get(ch, ch) for ch in text), keep)
+    dollars = len(re.findall(r"(?<!\\)\$", text))
+    opens = len(re.findall(r"(?<!\\)\{", text))
+    closes = len(re.findall(r"(?<!\\)\}", text))
+    esc_dollar, esc_braces = dollars % 2 == 1, opens != closes
+    out, i, math, raw = [], 0, False, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            m = re.match(r"\\([A-Za-z]+\*?|[%&#_{}$\\ ,;!^~])", text[i:])
+            if m:
+                out.append(m.group(0))
+                i += m.end()
+                if m.group(1)[0].isalpha() and i < len(text) and text[i] == "{" and not esc_braces:
+                    raw += 1  # the argument of a command stays as written
+                    out.append("{")
+                    i += 1
+                continue
+            out.append("\\textbackslash{}")
+            i += 1
+            continue
+        if ch == "$":
+            out.append("\\$" if esc_dollar else "$")
+            math = math if esc_dollar else not math
+        elif ch in "{}":
+            if esc_braces:
+                out.append("\\" + ch)
+            else:
+                if ch == "}" and raw:
+                    raw -= 1
+                out.append(ch)
+        elif ch == "%":
+            out.append("\\%")
+        elif math or raw:
+            out.append(ch)
+        elif ch in "&#_":
+            out.append("\\" + ch)
+        elif ch == "^":
+            out.append("\\^{}")
+        elif ch == "~":
+            out.append("~" if source or text[i + 1:i + 2] == "\\" else "\\~{}")
+        elif ch == '"':
+            out.append("``" if i == 0 or text[i - 1].isspace() or text[i - 1] in "([{`" else "''")
+        elif ch in "<>|":
+            out.append({"<": "\\textless{}", ">": "\\textgreater{}", "|": "\\textbar{}"}[ch])
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+NOTE_UNSAFE_ENVS = {"equation", "align", "gather", "multline", "eqnarray", "displaymath", "math", "flalign", "alignat",
+                    "split", "tabular", "tabularx", "array", "longtable", "tabu", "verbatim", "lstlisting", "minted",
+                    "comment", "tikzpicture", "algorithmic"}
+LIST_ENVS = {"itemize", "enumerate", "description"}
+
+
+def note_safe(lines: list[str], i: int) -> bool:
+    """Can a visible note go on line i (0-based)? Not in the preamble, maths, a table, a macro argument (a caption, a
+    footnote) or a list before its first \\item."""
+    doc = next((n for n, l in enumerate(lines) if "\\begin{document}" in code_part(l)), None)
+    if doc is not None and i <= doc:
+        return False
+    depth, stack, dmath = 0, [], False
+    for line in lines[(doc + 1 if doc is not None else 0):i]:
+        code = code_part(line)
+        j = 0
+        while j < len(code):
+            ch = code[j]
+            if ch == "\\":
+                m = re.match(r"\\(begin|end)\s*\{([^}]*)\}", code[j:])
+                if m:
+                    env = m.group(2).strip().rstrip("*")
+                    if m.group(1) == "begin":
+                        stack.append([env, False])
+                    else:
+                        for n in range(len(stack) - 1, -1, -1):
+                            if stack[n][0] == env:
+                                del stack[n:]
+                                break
+                    j += m.end()
+                    continue
+                if code.startswith("\\item", j) and stack:
+                    stack[-1][1] = True
+                if code.startswith("\\[", j):
+                    dmath = True
+                elif code.startswith("\\]", j):
+                    dmath = False
+                j += 2
+                continue
+            if code.startswith("$$", j):
+                dmath = not dmath
+                j += 2
+                continue
+            depth += ch == "{"
+            depth -= ch == "}"
+            j += 1
+    if depth != 0 or dmath:
+        return False
+    if any(e in NOTE_UNSAFE_ENVS for e, _ in stack):
+        return False
+    if stack and stack[-1][0] in LIST_ENVS and not stack[-1][1]:
+        return False
+    return True
+
+
+def note_def_state(p: "Project", path: str) -> dict | None:
+    """Where the \\claude macro is defined (the comment's own file if it has a preamble, else the main file), and the
+    handle its notes print when they name none: {"file", "kind": "new" | "old" | "none", "default"}."""
+    for f in [path, p.main]:
+        if not f or not (p.repo / f).exists():
+            continue
+        text = p.read(f)
+        lines = text.split("\n")
+        doc = next((n for n, l in enumerate(lines) if "\\begin{document}" in code_part(l)), None)
+        if doc is None:
+            continue
+        m = DEF_RE.search(text)
+        if not m:
+            return {"file": f, "kind": "none", "default": p.handle}
+        if m.group(1) == "4":
+            return {"file": f, "kind": "new", "default": m.group(2) or p.handle}
+        # The 0.3 macro prints a fixed name: "\textbf{<name>:} #2".
+        line = text[m.start():text.find("\n", m.start()) if "\n" in text[m.start():] else len(text)]
+        old = re.search(r"\\textbf\{([^{}:]+):\}\s*#2", line)
+        return {"file": f, "kind": "old", "default": old.group(1) if old else p.handle}
+    return None
+
+
+def ensure_note_def(p: "Project", ds: dict, handle: str) -> None:
+    """Add the macro to the preamble, or upgrade the 0.3 macro when a note must print another handle. The upgrade keeps
+    the old default name, so the notes already in the paper print as before."""
+    path = p.repo / ds["file"]
+    lines = path.read_text(encoding="utf-8").split("\n")
+    if ds["kind"] == "none":
+        doc = next(n for n, l in enumerate(lines) if "\\begin{document}" in code_part(l))
+        lines[doc:doc] = note_def(ds["default"], AGENT)
+    elif ds["kind"] == "old" and handle != ds["default"]:
+        n = next(i for i, l in enumerate(lines) if DEF_RE.search(l))
+        new = note_def(ds["default"], AGENT)
+        lines[n] = new[-1]
+        head = next((i for i in range(n - 1, max(-1, n - 5), -1) if lines[i].startswith(DEF_HEADS)), None)
+        if head is not None:
+            lines[head:head + 1] = new[:2]  # the new comment line and the switch that hides all notes
+        else:
+            lines[n:n] = [HIDE_LINE]
+    else:
+        return
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+# [[ ... ]] (or 【 ... 】) inside a paragraph marks the part a comment is about. They sit in the prose, so they are
+# found in the code part of each line; `pairtex resolve` removes them.
+BRACKETS = re.compile(r"(?<!\\)(\[\[|\]\]|【|】)")
+
+
+def strip_brackets(text: str) -> str:
+    return BRACKETS.sub("", text)
+
+
+def bracket_ranges(lines: list[str], a: int, b: int) -> list[dict]:
+    """Pairs of [[ and ]] in lines a..b-1, in order. A second [[ before a ]] restarts the pair."""
+    ranges, cur = [], None
+    for i in range(a, b):
+        line = lines[i]
+        k = comment_index(line)
+        code = line if k < 0 else line[:k]
+        for m in BRACKETS.finditer(code):
+            tok = m.group(1)
+            if tok in ("[[", "【"):
+                cur = (i, m.start(), len(tok))
+            elif cur is not None:
+                ranges.append({"open": cur, "close": (i, m.start(), len(tok))})
+                cur = None
+    return ranges
+
+
+def range_text(lines: list[str], r: dict) -> str:
+    (l1, c1, n1), (l2, c2, _) = r["open"], r["close"]
+    parts = []
+    for i in range(l1, l2 + 1):
+        line = lines[i]
+        k = comment_index(line)
+        code = line if k < 0 else line[:k]
+        parts.append(code[(c1 + n1 if i == l1 else 0):(c2 if i == l2 else len(code))])
+    return " ".join(" ".join(parts).split())
+
+
+def short_quote(text: str, head: int = 7, tail: int = 3) -> str:
+    w = text.split()
+    return text if len(w) <= head + tail + 1 else " ".join(w[:head]) + " … " + " ".join(w[-tail:])
+
+
+def is_blank(line: str) -> bool:
+    return line.strip() == ""
+
+
+def is_marker_line(line: str) -> bool:
+    mk = parse_marker(line)
+    return bool(mk and mk["full"]) or is_note_line(line)
+
+
+SECTION_RE = re.compile(r"\\(part|chapter|section|subsection|subsubsection|paragraph)\*?\s*(?:\[[^\]]*\])?\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
+LEVELS = ["part", "chapter", "section", "subsection", "subsubsection", "paragraph"]
+
+
+def breadcrumb(lines: list[str], upto: int) -> str:
+    crumbs: dict[int, str] = {}
+    for i in range(min(upto, len(lines))):
+        line = lines[i]
+        k = comment_index(line)
+        code = line if k < 0 else line[:k]
+        for m in SECTION_RE.finditer(code):
+            lvl = LEVELS.index(m.group(1))
+            crumbs[lvl] = re.sub(r"\s+", " ", m.group(2)).strip()
+            for deeper in [l for l in crumbs if l > lvl]:
+                del crumbs[deeper]
+    return " › ".join(crumbs[l] for l in sorted(crumbs)) or "(before the first section)"
+
+
+def scan_file(path: str, text: str, terminator: str | None = None) -> tuple[list[dict], list[dict]]:
+    """Return (open comments, thread marks) in one file. Lines are 0-based.
+
+    With terminator "..", a comment runs from its %! or %? over following %! lines and plain % lines until a line
+    ending in ".."; only then is it ready. Without one, consecutive %! lines form a comment, ready at once (the watcher
+    then waits for it to settle)."""
+    lines = text.split("\n")
+    opens: list[dict] = []
+    marks: list[dict] = []
+    counts: dict[str, int] = {}
+    for n, line in enumerate(lines):
+        for cid in note_ids(line):
+            marks.append({"file": path, "line": n, "cid": cid, "kind": "note"})
+    i = 0
+    while i < len(lines):
+        mk = parse_marker(lines[i])
+        if mk is None:
+            i += 1
+            continue
+        if mk["kind"] != "open":
+            marks.append({"file": path, "line": i, "cid": mk["cid"], "kind": mk["kind"], "foreign": mk["foreign"]})
+            i += 1
+            continue
+        parts, j = [mk["text"]], i + 1
+        tail = ""
+        if terminator and not mk["full"]:
+            mt = MID_TERM.search(mk["text"])
+            if mt and mk["text"][mt.end():].strip():
+                tail = mk["text"][mt.end():].strip()
+                parts = [mk["text"][:mt.end()]]
+        ready = not terminator or bool(TERM_RE.search(parts[0]))
+        while j < len(lines) and not (terminator and ready):
+            m2 = parse_marker(lines[j])
+            if m2 and m2["kind"] == "open" and m2["full"]:
+                parts.append(m2["text"])
+            elif terminator and m2 is None and comment_index(lines[j]) >= 0 and code_part(lines[j]).strip() == "":
+                parts.append(lines[j][comment_index(lines[j]) + 1:].strip())  # a plain % line continues the comment
+            else:
+                break
+            j += 1
+            if terminator:
+                ready = bool(TERM_RE.search(parts[-1]))
+        if terminator and not ready:  # still being written: take only its %! lines, so plain % lines stay plain
+            j = i + 1
+            while j < len(lines) and (lambda m: m and m["kind"] == "open" and m["full"])(parse_marker(lines[j])):
+                j += 1
+            parts = [parse_marker(lines[n])["text"] for n in range(i, j)]
+        body = "\n".join(parts).strip()
+        if terminator and ready:
+            body = TERM_RE.sub("", body).rstrip()
+        if body:
+            k = counts.get(body, 0)
+            counts[body] = k + 1
+            follow = None
+            if i > 0:  # directly under one of this loop's threads or notes: a follow-up in that thread
+                prev = parse_marker(lines[i - 1])
+                if prev and prev["kind"] in ("thread", "reply"):
+                    follow = prev["cid"] if own_id(prev["cid"]) else None
+                elif note_ids(lines[i - 1]):
+                    cand = note_ids(lines[i - 1])[-1]
+                    follow = cand if own_id(cand) else None
+            opens.append({"file": path, "start": i, "end": j, "text": body, "inline": not mk["full"], "occ": k,
+                          "col": mk["col"], "mark": mk["mark"], "follow_up": follow, "ready": ready, "tail": tail})
+        i = j
+    # Each comment takes the bracketed parts of its paragraph that close before it and no earlier comment took.
+    claimed: set = set()
+    for c in opens:
+        a, b = anchor(lines, c)["span"]
+        pos = (c["start"], c["col"] if c["inline"] else 0)
+        rs = [r for r in bracket_ranges(lines, a, b) if r["open"][:2] not in claimed]
+        if c["start"] >= a:
+            rs = [r for r in rs if r["close"][:2] < pos]
+        c["ranges"] = [{"text": range_text(lines, r), "lines": [r["open"][0] + 1, r["close"][0] + 1],
+                        "open": list(r["open"]), "close": list(r["close"])} for r in rs]
+        claimed |= {r["open"][:2] for r in rs}
+        quoted = "\0".join(r["text"] for r in c["ranges"])
+        c["fp"] = sha1(f"{path}\0{c['text']}\0{c['occ']}\0{quoted}")[:16]
+    return opens, marks
+
+
+def scan(p: Project) -> dict:
+    opens, marks = [], []
+    for path in p.tex_files():
+        o, m = scan_file(path, p.read(path), p.terminator)
+        opens += o
+        marks += m
+    return {"opens": opens, "marks": marks, "thread_ids": sorted({m["cid"] for m in marks})}
+
+
+def paragraph_span(lines: list[str], i: int) -> tuple[int, int]:
+    a = i
+    while a > 0 and not is_blank(lines[a - 1]) and not is_marker_line(lines[a - 1]):
+        a -= 1
+    b = i + 1
+    while b < len(lines) and not is_blank(lines[b]) and not is_marker_line(lines[b]):
+        b += 1
+    return a, b
+
+
+def anchor(lines: list[str], c: dict) -> dict:
+    """The paragraph a comment refers to: its own line if inline, else the attached paragraph above or below."""
+    if c["inline"]:
+        a, b = paragraph_span(lines, c["start"])
+        return {"where": "the line with the comment, in this paragraph", "span": (a, b)}
+    j = c["start"] - 1
+    while j >= 0 and is_marker_line(lines[j]):
+        j -= 1
+    above_attached = j >= 0 and not is_blank(lines[j])
+    k = c["end"]
+    while k < len(lines) and is_marker_line(lines[k]):
+        k += 1
+    below_attached = k < len(lines) and not is_blank(lines[k])
+    if above_attached:
+        a, b = paragraph_span(lines, j)
+        return {"where": "the paragraph directly above", "span": (a, min(b, c["start"]))}
+    if below_attached:
+        a, b = paragraph_span(lines, k)
+        return {"where": "the paragraph directly below", "span": (max(a, c["end"]), b)}
+    while j >= 0 and is_blank(lines[j]):
+        j -= 1
+    if j >= 0:
+        return {"where": "the nearest paragraph above (a blank line separates it)", "span": paragraph_span(lines, j)}
+    return {"where": "no paragraph nearby", "span": (c["start"], c["end"])}
+
+
+def excerpt(lines: list[str], a: int, b: int, limit: int = 2400) -> str:
+    out, used = [], 0
+    for i in range(a, b):
+        line = lines[i]
+        if len(line) > 1600:
+            line = line[:1600] + " …"
+        out.append(f"{i + 1:>5}  {line}")
+        used += len(line)
+        if used > limit and i < b - 1:
+            out.append(f"       … ({b - i - 1} more lines)")
+            break
+    return "\n".join(out)
+
+
+# ------------------------------------------------------------------------------ prose comparison
+
+def strip_macros(text: str, names: list[str]) -> str:
+    if not names:
+        return text
+    pat = re.compile(r"\\(" + "|".join(map(re.escape, names)) + r")\s*\{")
+    out, i = [], 0
+    while True:
+        m = pat.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        j, depth = m.end(), 1
+        while j < len(text) and depth:
+            ch = text[j]
+            if ch == "\\":
+                j += 2
+                continue
+            depth += ch == "{"
+            depth -= ch == "}"
+            j += 1
+        i = j
+    return "".join(out)
+
+
+def macro_bodies(text: str, names: list[str]) -> list[str]:
+    bodies = []
+    if not names:
+        return bodies
+    pat = re.compile(r"\\(" + "|".join(map(re.escape, names)) + r")\s*\{")
+    for m in pat.finditer(text):
+        j, depth = m.end(), 1
+        while j < len(text) and depth:
+            ch = text[j]
+            if ch == "\\":
+                j += 2
+                continue
+            depth += ch == "{"
+            depth -= ch == "}"
+            j += 1
+        bodies.append(f"\\{m.group(1)}{{{text[m.end():j - 1]}}}")
+    return bodies
+
+
+def prose_paragraphs(text: str, macros: list[str]) -> list[str]:
+    """Paragraphs of a TeX source with comments and protected note macros removed, whitespace collapsed."""
+    kept = []
+    for line in text.split("\n"):
+        k = comment_index(line)
+        if k >= 0:
+            if line[:k].strip() == "":
+                continue
+            line = line[:k]
+        kept.append(line)
+    body = strip_brackets(strip_macros(strip_notes("\n".join(kept)), macros))
+    paras, cur = [], []
+    for line in body.split("\n"):
+        if line.strip():
+            cur.append(line.strip())
+        elif cur:
+            paras.append(" ".join(cur))
+            cur = []
+    if cur:
+        paras.append(" ".join(cur))
+    return [re.sub(r"\s+", " ", x).strip() for x in paras if x.strip()]
+
+
+def para_changes(a: str, b: str, macros: list[str]) -> list[tuple[str, str]]:
+    pa, pb = prose_paragraphs(a, macros), prose_paragraphs(b, macros)
+    sm = difflib.SequenceMatcher(None, pa, pb, autojunk=False)
+    out: list[tuple[str, str]] = []
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        olds, news = pa[i1:i2], pb[j1:j2]
+        if op == "replace":
+            if len(olds) == len(news):
+                out += list(zip(olds, news))
+            else:
+                out.append(("\n\n".join(olds), "\n\n".join(news)))
+        elif op == "delete":
+            out += [(o, "") for o in olds]
+        else:
+            out += [("", n) for n in news]
+    return out
+
+
+def similarity(a: str, b: str) -> float:
+    ta, tb = a.split(), b.split()
+    if not ta or not tb:
+        return 0.0
+    sm = difflib.SequenceMatcher(None, ta, tb, autojunk=False)
+    if sm.real_quick_ratio() < 0.35 or sm.quick_ratio() < 0.35:
+        return 0.0
+    return sm.ratio()
+
+
+def word_diff(a: str, b: str, ctx: int = 8) -> str:
+    """Inline word diff: [-removed-]{+added+}, long unchanged stretches elided."""
+    ta, tb = a.split(), b.split()
+    sm = difflib.SequenceMatcher(None, ta, tb, autojunk=False)
+    ops = sm.get_opcodes()
+    out = []
+    for n, (op, i1, i2, j1, j2) in enumerate(ops):
+        if op == "equal":
+            words = ta[i1:i2]
+            first, last = n == 0, n == len(ops) - 1
+            if len(words) > 2 * ctx + 3:
+                head_part = [] if first else words[:ctx]
+                tail_part = [] if last else words[-ctx:]
+                words = head_part + ["…"] + tail_part
+            out.append(" ".join(words))
+        elif op == "delete":
+            out.append("[-" + " ".join(ta[i1:i2]) + "-]")
+        elif op == "insert":
+            out.append("{+" + " ".join(tb[j1:j2]) + "+}")
+        else:
+            out.append("[-" + " ".join(ta[i1:i2]) + "-]{+" + " ".join(tb[j1:j2]) + "+}")
+    return " ".join(x for x in out if x)
+
+
+def clip(text: str, n: int = 4000) -> str:
+    return text if len(text) <= n else text[:n] + " …[clipped]"
+
+
+# ------------------------------------------------------------------------------ evidence (style)
+
+def append_events(p: Project, st: dict, events: list[dict]) -> list[str]:
+    if not events:
+        return []
+    ids = write_events(events, p.slug)
+    st["pending_events"] = st.get("pending_events", []) + ids
+    return ids
+
+
+def read_events(ids: list[str]) -> list[dict]:
+    if not EVIDENCE.exists() or not ids:
+        return []
+    want = set(ids)
+    found = {}
+    with open(EVIDENCE, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                e = json.loads(line)
+                if e.get("id") in want and not e.get("discarded") and not e.get("acked"):
+                    found[e["id"]] = e
+    return [found[i] for i in ids if i in found]
+
+
+def evaluate_changes(p: Project, comment: dict) -> tuple[str, list[dict]]:
+    """Compare what the agent wrote for a comment with the text now in the checkout."""
+    results = []
+    cache: dict[str, list[str]] = {}
+    for ch in comment.get("changes", []):
+        f = ch["file"]
+        if f not in cache:
+            cache[f] = prose_paragraphs(p.read(f), p.macros) if (p.repo / f).exists() else []
+        paras = cache[f]
+        before, claude = ch["before"], ch["claude"]
+        r = {"file": f, "before": clip(before), "claude": clip(claude), "diff_claude": clip(word_diff(before, claude))}
+        if not claude:
+            r["outcome"] = "reverted" if before and before in paras else "kept"
+        elif claude in paras or all(x in paras for x in claude.split("\n\n")):
+            r["outcome"] = "kept"
+        elif before and before in paras:
+            r["outcome"] = "reverted"
+        else:
+            best, score = "", 0.0
+            for q in paras:
+                s = similarity(claude, q)
+                if s > score:
+                    best, score = q, s
+            if score >= 0.5:
+                r.update(outcome="revised", author_text=clip(best), diff_author=clip(word_diff(claude, best)),
+                         author_sha=sha1(best))
+            else:
+                r["outcome"] = "removed" if not before else "unknown"
+        results.append(r)
+    if not results:
+        return "answered", results
+    kinds = {r["outcome"] for r in results}
+    for k in ("reverted", "removed", "revised", "unknown"):
+        if k in kinds:
+            return k if len(kinds) == 1 else f"partly {k}", results
+    return "kept", results
+
+
+def only_owner_since(p: Project, st: dict, c: dict) -> bool:
+    """Did only the owner (and this loop) change the comment's file since its answer was published?"""
+    since = c.get("pushed_commit")
+    if not p.owner or not since or not git_ok(p.repo, "cat-file", "-e", since):
+        return True
+    ours = set(st.get("ours", []))
+    log = git(p.repo, "log", "--format=%H%x09%an%x09%s", f"{since}..HEAD", "--", c["file"], check=False)
+    for line in log.splitlines():
+        sha, author, subject = (line.split("\t") + ["", ""])[:3]
+        if sha in ours or (p.is_author_edit(subject) and author == p.owner):
+            continue
+        return False
+    return True
+
+
+def detect_closed(p: Project, st: dict, scanned: dict) -> list[dict]:
+    """Threads the commenter has deleted from the source, i.e. accepted (or dismissed). Record the outcome. Only the
+    owner's own comments are evidence for the owner's style vault."""
+    live = set(scanned["thread_ids"])
+    events = []
+    for cid, c in sorted(st["comments"].items(), key=lambda kv: id_num(kv[0])):
+        if c.get("status") != "pushed" or cid in live:
+            continue
+        if (c.get("kind") == "question" and not c.get("changes")) or (p.owner and c.get("author", p.owner) != p.owner):
+            c.update(status="closed", closed_at=now_iso(), outcome="answered" if c.get("kind") == "question" else "closed")
+            continue
+        outcome, results = evaluate_changes(p, c)
+        if "revised" in outcome and not only_owner_since(p, st, c):
+            # Someone else (a coauthor, their loop, another tool) also edited this file since the answer was published,
+            # so the rewrite may not be the owner's: not evidence for the owner's style.
+            for r in results:
+                if r.get("outcome") == "revised":
+                    for k in ("author_text", "diff_author", "author_sha"):
+                        r.pop(k, None)
+                    r["outcome"] = "changed by others"
+            outcome = outcome.replace("revised", "changed by others")
+        c.update(status="closed", closed_at=now_iso(), outcome=outcome)
+        reported = c.setdefault("revision_hashes", [])
+        for r in results:
+            if r.get("outcome") == "revised":
+                if r["author_sha"] in reported:
+                    r["already_reported"] = True
+                else:
+                    reported.append(r["author_sha"])
+        events.append({"kind": "closed", "cid": cid, "outcome": outcome, "comment": c["text"], "reply": c.get("reply", ""),
+                       "file": c["file"], "section": c.get("section", ""), "changes": results})
+    return events
+
+
+def own_edit_events(p: Project, st: dict) -> list[dict]:
+    """Prose changes the owner made in the editor since the last window, minus the agent's own pushes."""
+    start = st.get("window_commit")
+    end = head(p.repo)
+    if not start or start == end or not git_ok(p.repo, "cat-file", "-e", start):
+        st["window_commit"] = end
+        return []
+    commits = git(p.repo, "log", "--reverse", "--topo-order", "--format=%H%x09%an%x09%s", f"{start}..{end}").splitlines()
+    ours = set(st.get("ours", []))
+    # Only runs of consecutive edits by the owner count. A push by the loop or by another tool or session (a commit with
+    # its own message), or an edit by a coauthor, ends a run: those changes are never read as the owner's writing, even
+    # when the owner edits the same paragraph later. Overleaf's commits each carry the name of the person who edited.
+    authors, runs, cur, prev = set(), [], None, start
+    for line in commits:
+        sha, author, subject = (line.split("\t") + ["", ""])[:3]
+        if sha not in ours and p.is_author_edit(subject) and (not p.owner or author == p.owner):
+            authors.add(author)
+            cur = [prev, sha] if cur is None else [cur[0], sha]
+        elif cur is not None:
+            runs.append(cur)
+            cur = None
+        prev = sha
+    if cur is not None:
+        runs.append(cur)
+    if not runs:
+        st["window_commit"] = end
+        return []
+    excluded = set(st.get("ours_paras", {}).keys())
+    ours_paras = st.get("ours_paras", {})
+    events = []
+    for a_rev, b_rev in runs:
+        events += run_edit_events(p, st, a_rev, b_rev, excluded, ours_paras, authors)
+    st["window_commit"] = end
+    return events
+
+
+def without_new_comments(new_text: str, old_text: str) -> str:
+    """The new text with each inline comment (%!, %?) undone: the line goes back to its old version when exactly one old line
+    starts the same way (a mid-line marker hides the rest of its line), else to its code part. Commenting is not writing."""
+    old_lines = [(ol, " ".join(ol.split())) for ol in old_text.split("\n") if not parse_marker(ol)]
+    out = []
+    for line in new_text.split("\n"):
+        mk = parse_marker(line)
+        if mk and mk["kind"] == "open" and not mk["full"]:
+            prefix = " ".join(strip_brackets(line[:mk["col"]]).split())
+            cands = [ol for ol, oln in old_lines if prefix and oln.startswith(prefix)]
+            if len(cands) == 1:
+                line = cands[0]
+        out.append(line)
+    return "\n".join(out)
+
+
+def run_edit_events(p: Project, st: dict, a_rev: str, b_rev: str, excluded: set, ours_paras: dict,
+                    web_authors: set) -> list[dict]:
+    events = []
+    for f in changed_files(p.repo, a_rev, b_rev):
+        if not p.watched(f):
+            continue
+        old_text, new_text = file_at(p.repo, a_rev, f) or "", file_at(p.repo, b_rev, f) or ""
+        lines = new_text.split("\n")
+        # The author can only have changed the agent's text if it was in the file when the run began. Text the agent
+        # published later (a push from chat while these edits waited to be read) is never the "before" side.
+        before_paras = {sha1(x) for x in prose_paragraphs(old_text, p.macros)}
+        present = {h: info for h, info in ours_paras.items()
+                   if all(sha1(x) in before_paras for x in info["text"].split("\n\n") if x.strip())}
+        for old, new in para_changes(old_text, without_new_comments(new_text, old_text), p.macros):
+            if new and sha1(new) in excluded:
+                continue
+            if old and new and old.split() == new.split():
+                continue
+            match_cid, match_text, score = None, None, 0.0
+            if new and old and sha1(old) in present:  # the run started from the agent's paragraph itself
+                match_cid, match_text, score = present[sha1(old)].get("cid"), old, 1.0
+            elif new:
+                for h, info in present.items():
+                    s = similarity(info["text"], new)
+                    if s > score:
+                        match_cid, match_text, score = info.get("cid"), info["text"], s
+            section = locate_section(lines, new or old)
+            if match_text and score >= 0.6:
+                cm = st["comments"].get(match_cid or "", {})
+                hashes = cm.setdefault("revision_hashes", [])
+                if sha1(new) in hashes:
+                    continue
+                hashes.append(sha1(new))
+                events.append({"kind": "revised", "cid": match_cid, "comment": cm.get("text", ""), "file": f,
+                               "section": section, "claude": clip(match_text), "author_text": clip(new),
+                               "diff_author": clip(word_diff(match_text, new)), "authors": sorted(web_authors)})
+            else:
+                kind = "own_edit" if old and new else ("own_addition" if new else "own_deletion")
+                events.append({"kind": kind, "file": f, "section": section, "before": clip(old), "after": clip(new),
+                               "diff": clip(word_diff(old, new)) if old and new else "", "authors": sorted(web_authors)})
+    return events
+
+
+def locate_section(lines: list[str], para: str) -> str:
+    """Section path of the line where a prose paragraph starts (its first words, or its first line when it opens with a
+    heading). A heading on that line counts."""
+    words = para.split()[:6]
+    for n in (3, 2, 1):
+        probe = words[:n]
+        if not probe or (n == 1 and len(probe[0]) < 8):
+            continue
+        for i, line in enumerate(lines):
+            if all(w in line for w in probe):
+                return breadcrumb(lines, i + 1)
+    return ""
+
+
+# ------------------------------------------------------------------------------ remote integration
+
+def integrate(p: Project, st: dict, remote_sha: str) -> bool:
+    """Bring the checkout to the remote head. Returns True when the checkout changed."""
+    repo = p.repo
+    local = head(repo)
+    if local == remote_sha:
+        return False
+    git(repo, "fetch", "--quiet", p.remote, p.branch, timeout=240)
+    if is_ancestor(repo, local, remote_sha):
+        if dirty(repo):
+            raise OwError(f"the checkout has uncommitted edits, so it cannot take {p.label}'s new changes. Publish them "
+                          f"with `pairtex push`, or inspect them with `git -C {repo} status`.", EXIT_BUSY)
+        git(repo, "merge", "--ff-only", "--quiet", remote_sha)
+    elif is_ancestor(repo, remote_sha, local):
+        raise OwError(f"the checkout has commits that are not in {p.label} yet. Publish them with `pairtex push`.", EXIT_BUSY)
+    elif not dirty(repo) and local in set(st.get("ours", [])) | {st.get("last_merged")}:
+        # Diverged, but everything local is already published: follow the source of truth.
+        git(repo, "reset", "--hard", "--quiet", remote_sha)
+    else:
+        raise OwError(f"the checkout and {p.label} have diverged and the checkout holds unpublished work. "
+                      "Inspect `git log` in the checkout before continuing.", EXIT_BUSY)
+    st["last_merged"] = remote_sha
+    st["checkpoint"] = tree_of(repo, "HEAD")
+    st["batch_threads"] = scan(p)["thread_ids"]
+    return True
+
+
+# ------------------------------------------------------------------------------------ folder backend
+#
+# A paper in a local folder that an editor (VS Code, TeXstudio, Emacs, ...) saves into. The project keeps a bare
+# repository, folder.git, as the folder's history: every poll that finds the folder changed records it there as a commit
+# "Update in editor." by the author, exactly as Overleaf records web edits. The loop's checkout pulls from and pushes to
+# folder.git like any remote, and a push writes the changed files back into the folder, but only files the author has
+# not saved again since the snapshot it merged onto; otherwise it takes a new snapshot and merges again.
+
+FOLDER_IGNORE = ["*.aux", "*.log", "*.out", "*.toc", "*.lof", "*.lot", "*.bbl", "*.blg", "*.bcf", "*.run.xml", "*.fls",
+                 "*.fdb_latexmk", "*.synctex.gz", "*.synctex(busy)", "*.synctex", "*.nav", "*.snm", "*.vrb", "*.idx",
+                 "*.ilg", "*.ind", "*.xdv", "*.dvi", "*.spl", "*~", "*.swp", "*.swo", ".#*", "#*#", ".DS_Store",
+                 "*.pairtex-tmp", "*.ow-tmp", "Thumbs.db"]
+FOLDER_SKIP_DIRS = {".git", ".svn", ".hg", "_minted", "build", "out", ".texpadtmp", "__pycache__", "node_modules",
+                    ".vscode", ".idea", "auto"}
+FOLDER_MAX_BYTES = 50 * 1024 * 1024
+
+
+class _FolderLock:
+    def __init__(self, path: Path):
+        self.f = open(path, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def close(self):
+        try:
+            fcntl.flock(self.f, fcntl.LOCK_UN)
+        finally:
+            self.f.close()
+
+
+def folder_lock(p: Project) -> _FolderLock:
+    """Only one process at a time records the folder or writes into it."""
+    return _FolderLock(p.dir / "folder.lock")
+
+
+def folder_files(p: Project) -> list[str]:
+    root = p.folder
+    if not root or not root.is_dir():
+        raise GitError(f"the paper's folder {root} is missing")
+    extra = p.cfg.get("folder_ignore", [])
+    main_pdf = (str(Path(p.main).with_suffix(".pdf")) if p.main else None)
+    if (root / ".git").exists():  # the author's own git repository: take what it tracks or would track
+        listed = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
+    else:
+        listed = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in FOLDER_SKIP_DIRS and not d.startswith("."))
+            for fn in filenames:
+                listed.append(os.path.relpath(os.path.join(dirpath, fn), root))
+    out = []
+    for rel in listed:
+        if not rel or "\t" in rel or "\n" in rel:
+            continue
+        rel = rel.replace(os.sep, "/")
+        name = rel.rsplit("/", 1)[-1]
+        if any(fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel, pat) for pat in FOLDER_IGNORE + extra):
+            continue
+        if rel == main_pdf:
+            continue
+        full = root / rel
+        if full.is_symlink() or not full.is_file():
+            continue
+        if full.stat().st_size > FOLDER_MAX_BYTES:
+            continue
+        out.append(rel)
+    return sorted(out)
+
+
+def folder_sync_in(p: Project, locked: bool = False) -> str:
+    """Record the folder in folder.git if it changed; return folder.git's head."""
+    bare = f"--git-dir={p.dir / 'folder.git'}"
+    lock = None if locked else folder_lock(p)
+    try:
+        files = folder_files(p)
+        cache_path = p.dir / "folder-cache.json"
+        try:
+            cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+        except ValueError:
+            cache = {}
+        before = set(cache)
+        stats, todo = {}, []
+        now_ns = time.time_ns()
+        for rel in files:  # hash only the files whose size, time or mode changed, or that changed in the last seconds
+            s = (p.folder / rel).stat()
+            stats[rel] = [s.st_mtime_ns, s.st_size, "100755" if s.st_mode & 0o111 else "100644"]
+            c = cache.get(rel)
+            if not c or c[:3] != stats[rel] or now_ns - s.st_mtime_ns < 3_000_000_000:
+                todo.append(rel)
+        if todo:
+            shas = git(p.folder, bare, "hash-object", "-w", "--no-filters", "--stdin-paths",
+                       input_text="\n".join(todo) + "\n").split()
+            for rel, sha in zip(todo, shas):
+                cache[rel] = stats[rel] + [sha]
+        cache = {rel: cache[rel] for rel in files}
+        ref = f"refs/heads/{p.branch}"
+        old = git(p.dir, bare, "rev-parse", "--verify", "--quiet", ref, check=False).strip()
+        if old and not todo and set(cache) == before:
+            return old
+        ienv = {"GIT_INDEX_FILE": str(p.dir / "folder.index")}
+        git(p.dir, bare, "read-tree", "--empty", extra_env=ienv)
+        info = "".join(f"{c[2]} {c[3]}\t{rel}\n" for rel, c in cache.items())
+        if info:
+            git(p.dir, bare, "update-index", "--index-info", input_text=info, extra_env=ienv)
+        tree = git(p.dir, bare, "write-tree", extra_env=ienv).strip()
+        cache_path.write_text(json.dumps(cache))
+        if old and tree == git(p.dir, bare, "rev-parse", f"{old}^{{tree}}").strip():
+            return old
+        name = p.owner or "author"
+        email = PROFILE.get("email") or git(p.dir, "config", "--global", "user.email", check=False).strip() \
+            or "author@localhost"
+        cenv = {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email, "GIT_COMMITTER_NAME": name,
+                "GIT_COMMITTER_EMAIL": email}
+        new = git(p.dir, bare, "commit-tree", tree, *(["-p", old] if old else []), "-m", FOLDER_MESSAGE,
+                  extra_env=cenv).strip()
+        git(p.dir, bare, "update-ref", ref, new, *([old] if old else []))
+        return new
+    finally:
+        if lock:
+            lock.close()
+
+
+def folder_write_out(p: Project, rev: str, target: str | None = None) -> bool:
+    """Write the files that differ between `base` (what the folder held at the last snapshot) and `rev` into the
+    folder. With target, write `target`'s version back instead (an undo). Returns False, writing nothing, when the
+    author saved one of those files again since the snapshot."""
+    repo = p.repo
+    base = git(p.dir, f"--git-dir={p.dir / 'folder.git'}", "rev-parse", f"refs/heads/{p.branch}").strip()
+    src = target or rev
+    if not git_ok(repo, "cat-file", "-e", base):
+        git(repo, "fetch", "--quiet", p.remote, p.branch, timeout=240)
+    files = changed_files(repo, base, src) if not target else changed_files(repo, rev, target)
+    if not files:
+        return True
+    if not target:
+        for f in files:  # compare-and-swap: the folder must still hold what the snapshot recorded
+            full = p.folder / f
+            want = git(repo, "rev-parse", f"{base}:{f}").strip() if git_ok(repo, "cat-file", "-e", f"{base}:{f}") \
+                else None
+            have = git(p.folder, f"--git-dir={p.dir / 'folder.git'}", "hash-object", "--no-filters",
+                       str(full)).strip() if full.is_file() else None
+            if want != have:
+                return False
+    for f in files:
+        full = p.folder / f
+        if git_ok(repo, "cat-file", "-e", f"{src}:{f}"):
+            data = git_bytes(repo, "show", f"{src}:{f}")
+            full.parent.mkdir(parents=True, exist_ok=True)
+            tmp = full.with_name("." + full.name + ".pairtex-tmp")
+            tmp.write_bytes(data)
+            if full.exists():
+                shutil.copymode(full, tmp)
+            os.replace(tmp, full)
+        elif full.exists():
+            full.unlink()
+    return True
+
+
+# ----------------------------------------------------------------------------------------- batch
+
+def midline(p: Project, path: str, line: str, text: str) -> dict | None:
+    """A %! or %? typed in the middle of a line turns the rest of that line into comment text. Find the line as it was before
+    the comment (in the file's recent history) and the words that were prose: they must be restored."""
+    k = comment_index(line)
+    prefix = " ".join(strip_brackets(line[:k]).split())
+    if not prefix:
+        return None
+    revs = git(p.repo, "log", "--format=%H", "-n", "40", "HEAD", "--", path, check=False).split()
+    for rev in revs:
+        old = file_at(p.repo, rev, path)
+        if old is None:
+            continue
+        for ol in old.split("\n"):
+            if parse_marker(ol) or BRACKETS.search(ol):
+                continue
+            j = comment_index(ol)
+            oln = " ".join((ol if j < 0 else ol[:j]).split())
+            if not oln.startswith(prefix):
+                continue
+            rest_code = oln[len(prefix):].strip()
+            if not rest_code:
+                return None  # the comment went at the end of the line: nothing was hidden
+            rw, tw = rest_code.split(), text.split()
+            n = 0
+            while n < min(len(rw), len(tw)) and rw[-1 - n] == tw[-1 - n]:
+                n += 1
+            if n == 0:
+                return {"before_line": ol, "displaced": None, "comment": text}
+            disp = " ".join(rw[-n:])
+            return {"before_line": ol, "displaced": disp, "comment": " ".join(tw[:-n]).strip() or text}
+    return None
+
+
+def comment_author(p: Project, c: dict) -> str:
+    """Who wrote a comment: the author of the commit that first added its marker line (in a folder, the owner)."""
+    if p.backend == "folder" or not p.owner:
+        return p.owner
+    line = p.read(c["file"]).split("\n")[c["start"]]
+    probe = line[c["col"]:c["col"] + 48]
+    try:
+        out = git(p.repo, "log", "--reverse", "--format=%an", f"-S{probe}", "HEAD", "--", c["file"], timeout=90)
+        names = [n for n in out.splitlines() if n.strip()]
+        if names:
+            return names[0]
+        out = git(p.repo, "blame", "--porcelain", "-L", f"{c['start'] + 1},{c['start'] + 1}", "HEAD", "--", c["file"])
+        m = re.search(r"^author (.+)$", out, re.M)
+        if m and m.group(1) != "Not Committed Yet":
+            return m.group(1)
+    except GitError:
+        pass
+    return p.owner
+
+
+def comment_record(p: Project, c: dict, cid: str, author: str | None = None) -> dict:
+    lines = p.read(c["file"]).split("\n")
+    anc = anchor(lines, c)
+    a, b = anc["span"]
+    author = author if author is not None else comment_author(p, c)
+    rec = {"id": cid, "status": "sent", "fp": c["fp"], "file": c["file"], "line": c["start"] + 1, "text": c["text"],
+           "author": author, "handle": p.handle_for(author),
+           "kind": kind_of(c["mark"]), "mark": c["mark"], "ranges": [{"text": r["text"], "lines": r["lines"]}
+                                                                    for r in c.get("ranges", [])],
+           "inline": c["inline"], "occ": c["occ"], "follow_up": c.get("follow_up"), "section": breadcrumb(lines, c["start"]),
+           "anchor": anc["where"], "anchor_lines": [a + 1, b], "sent_at": now_iso()}
+    if c["inline"] and c.get("tail"):  # the author wrote on after the comment's "..": those words are prose
+        first = lines[c["start"]]
+        rec["midline"] = {"before_line": join_prose(strip_brackets(first[:comment_index(first)]), c["tail"]),
+                          "displaced": c["tail"], "comment": c["text"], "tail": True}
+    elif c["inline"]:
+        try:
+            mid = midline(p, c["file"], lines[c["start"]], c["text"])
+        except GitError:
+            mid = None
+        if mid:
+            rec["midline"] = mid
+    return rec
+
+
+def render_comment(p: Project, st: dict, rec: dict) -> str:
+    lines = p.read(rec["file"]).split("\n")
+    tag = " · question" if rec.get("kind") == "question" else ""
+    who = rec.get("handle") or p.handle
+    by = f" · from {rec['author']}" if rec.get("author") and p.owner and rec["author"] != p.owner else ""
+    out = [f"## {rec['id']}{tag} · {rec['file']}:{rec['line']} · {rec['section']}{by}", ""]
+    out += ["> " + l for l in rec["text"].split("\n")]
+    out.append("")
+    if rec.get("kind") == "question":
+        out += ["**A question: answer it in the reply and change no text.** `pairtex resolve` refuses a question whose "
+                f"paragraphs changed. If the answer shows the text should change, say so and offer the edit; {who} can "
+                "follow up with `%! …`.", ""]
+    for r in rec.get("ranges", []):
+        l1, l2 = r["lines"]
+        where = f"line {l1}" if l1 == l2 else f"lines {l1}–{l2}"
+        out += [f"About the bracketed part ({where}): \"{r['text']}\". Leave the `[[` `]]` where they are; "
+                f"`pairtex resolve` removes them.", ""]
+    if rec.get("follow_up"):
+        prev = st["comments"].get(rec["follow_up"])
+        if prev:
+            out.append(f"Follow-up in thread {rec['follow_up']}. Earlier comment: \"{prev['text']}\". "
+                       f"Earlier reply: \"{prev.get('reply', '')}\".")
+        else:
+            out.append(f"Follow-up under thread {rec['follow_up']} (not in this project's records).")
+        out.append("")
+    a, b = rec["anchor_lines"]
+    mid = rec.get("midline")
+    if mid and mid.get("tail"):
+        out.append(f"{who} typed `%{rec.get('mark', '@')}` in the middle of line {rec['line']} and wrote on after the comment's "
+                   f"`..`: \"{mid['displaced']}\" is the sentence's own prose, which LaTeX hides until the comment is "
+                   f"answered. `pairtex resolve` puts it back right after the comment's point, so the line will read:")
+        out += ["```tex", mid["before_line"], "```",
+                "Do not retype those words. To change them, edit them where they are, after the `..`; if your edit already "
+                "puts them in the paragraph, delete them there.", ""]
+    elif mid:
+        out.append(f"{who} typed `%{rec.get('mark', '@')}` in the middle of line {rec['line']}: it marks a point in the "
+                   f"sentence, and LaTeX now drops the rest of that line from the PDF. Before the comment the line read:")
+        out += ["```tex", mid["before_line"], "```"]
+        if mid.get("displaced"):
+            out.append(f"So the comment is \"{mid['comment']}\", and its last words \"{mid['displaced']}\" are the line's "
+                       f"own prose: put them back in the sentence (`pairtex resolve` then moves the thread under the line).")
+        else:
+            out.append("Restore the prose that the comment hid (`pairtex resolve` then moves the thread under the line).")
+        out.append("")
+    out.append(f"Refers to {rec['anchor']} (lines {a}–{b}):")
+    out.append("```tex")
+    out.append(excerpt(lines, a - 1, b))
+    out.append("```")
+    if rec.get("kind") == "question":
+        out += question_context(p, rec, lines)
+    return "\n".join(out)
+
+
+def bigram_overlap(target: str, text: str) -> float:
+    t, x = target.split(), text.split()
+    tb = {(t[i], t[i + 1]) for i in range(len(t) - 1)}
+    if not tb:
+        return 0.0
+    xb = {(x[i], x[i + 1]) for i in range(len(x) - 1)}
+    return len(tb & xb) / len(tb)
+
+
+def question_context(p: Project, rec: dict, lines: list[str]) -> list[str]:
+    """For a question: when these lines changed, and the closest passage in the earlier drafts the project lists."""
+    out = []
+    spans = [r["lines"] for r in rec.get("ranges", [])] or [rec["anchor_lines"]]
+    a, b = min(s[0] for s in spans), max(s[1] for s in spans)
+    try:
+        log = git(p.repo, "log", f"-L{a},{b}:{rec['file']}", "--format=%x01%h %ad %an | %s", "--date=short", "-n", "8",
+                  timeout=90)
+        commits = [l[1:] for l in log.splitlines() if l.startswith("\x01")]
+    except OwError:
+        commits = []
+    if commits:
+        out += ["", f"History of these lines in {p.label} (newest first; `git -C <checkout> show <sha>` for a change):"]
+        out += [f"- {c}" for c in commits]
+    target = " ".join(r["text"] for r in rec.get("ranges", [])) or " ".join(
+        prose_paragraphs("\n".join(lines[rec["anchor_lines"][0] - 1:rec["anchor_lines"][1]]), p.macros))
+    found = []
+    for f in p.cfg.get("earlier_versions", []):
+        if not (p.repo / f).exists() or f == rec["file"]:
+            continue
+        text = p.read(f)
+        best, score = "", 0.0
+        for para in prose_paragraphs(text, p.macros):
+            s = bigram_overlap(target, para)
+            if s > score:
+                best, score = para, s
+        if score >= 0.2:
+            flines = text.split("\n")
+            probe = best.split()[:3]
+            at = next((i + 1 for i, l in enumerate(flines) if probe and all(w in l for w in probe)), 0)
+            found.append(f"- {f}" + (f":{at}" if at else "") + f" ({score:.0%} of the word pairs): {clip(best, 700)}")
+    if found:
+        out += ["", "The closest passage in the earlier drafts:"] + found
+    return out
+
+
+def diff_author(e: dict) -> str:
+    """The author's rewrite of the agent's text (called diff_fan in evidence from before 0.4.1)."""
+    return e.get("diff_author") or e.get("diff_fan") or ""
+
+
+def render_event_line(e: dict, who: str) -> str:
+    k = e["kind"]
+    if k == "closed":
+        extra = ""
+        for r in e.get("changes", []):
+            if r.get("outcome") == "revised" and not r.get("already_reported"):
+                extra = f" · {who}'s change: " + clip(diff_author(r), 260)
+                break
+        return f"- {e['id']} · {e['cid']} closed by {who} · {e['outcome']} · \"{clip(e['comment'], 90)}\"{extra}"
+    if k == "revised":
+        whose = f"written for {e['cid']}" if e.get("cid") else "the agent wrote"
+        return f"- {e['id']} · {who} revised the text {whose} · {e.get('section', '')}: {clip(diff_author(e), 300)}"
+    if k == "own_edit":
+        return f"- {e['id']} · {who}'s own edit · {e.get('section', '')}: {clip(e['diff'], 300)}"
+    if k == "own_addition":
+        return f"- {e['id']} · {who} added a paragraph · {e.get('section', '')}: {clip(e['after'], 240)}"
+    if k == "own_deletion":
+        return f"- {e['id']} · {who} deleted a paragraph · {e.get('section', '')}: {clip(e['before'], 240)}"
+    return f"- {e['id']} · {k}"
+
+
+def style_summary() -> str:
+    if not STYLE_MD.exists():
+        return f"{STYLE_MD} (missing: `pairtex setup` creates it)"
+    text = STYLE_MD.read_text(encoding="utf-8")
+    rules = len(re.findall(r"^### ", text, re.M))
+    return f"{STYLE_MD} ({rules} entries, sha {sha1(text)[:7]})"
+
+
+def emit_batch(p: Project, st: dict, fresh: list[dict], reason: str) -> str:
+    # The checkpoint lets `pairtex resolve` attribute each edit to its comment.
+    st["checkpoint"] = stage_tree(p.repo) if dirty(p.repo) else tree_of(p.repo, "HEAD")
+    st["batch_threads"] = scan(p)["thread_ids"]
+    events = own_edit_events(p, st)
+    append_events(p, st, events)
+    pending = read_events(st.get("pending_events", []))
+    st["pending_events"] = [e["id"] for e in pending]  # events acknowledged or discarded while the watcher ran leave the queue
+    n = len(fresh)
+    title = f"{n} comment{'s' if n != 1 else ''}" if n else "writing-style evidence to learn from"
+    out = [f"# PairTeX · {p.slug} · {title} · {now_iso()}", "",
+           f"{p.label[0].upper() + p.label[1:]} head {short(st.get('remote_head'))} · checkout {p.repo}",
+           f"Style guide: {style_summary()} · project notes: {p.dir / 'NOTES.md'}", ""]
+    for rec in fresh:
+        out += [render_comment(p, st, rec), ""]
+    fresh_ids = {r["id"] for r in fresh}
+    unanswered = [cid for cid, c in st["comments"].items() if c["status"] in ("sent", "resolved") and cid not in fresh_ids]
+    if unanswered:
+        out += [f"Also still unanswered from an earlier batch: {', '.join(unanswered)} (`pairtex show {p.slug}`).", ""]
+    if pending:
+        out += [f"## Writing-style evidence not yet learned ({len(pending)})", ""]
+        out += [render_event_line(e, p.handle) for e in pending[:40]]
+        if len(pending) > 40:
+            out.append(f"- … and {len(pending) - 40} more (`pairtex learn {p.slug}`)")
+        out.append("")
+    ids = " ".join(r["id"] for r in fresh) or "(none)"
+    out += ["## Next", "",
+            f"1. Read the style guide (if it changed) and the project notes. Comments: {ids}.",
+            f"2. Edit {p.repo}. After each comment: `pairtex resolve {p.slug} <id> \"reply\"`.",
+            f"3. `pairtex push {p.slug} -m \"…\"` (compiles, commits, publishes to {p.label}).",
+            f"4. Learn: `pairtex learn {p.slug}` for full diffs, update {STYLE_MD}, then `pairtex learn {p.slug} --ack <E-ids>`.",
+            f"5. Start `pairtex watch {p.slug}` again in the background. ({reason})"]
+    text = "\n".join(out) + "\n"
+    batches = p.dir / "batches"
+    batches.mkdir(exist_ok=True)
+    (batches / (dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".md")).write_text(text, encoding="utf-8")
+    return text
+
+
+# ------------------------------------------------------------------------------------- commands
+
+def cmd_init(args) -> int:
+    slug = args.slug
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        raise OwError("use a short lowercase slug, e.g. mypaper")
+    d = PROJECTS / slug
+    if (d / "project.json").exists():
+        raise OwError(f"project {slug} exists: {d}")
+    sources = [x for x in (args.overleaf, args.git, args.folder, args.remote) if x]
+    if len(sources) != 1:
+        raise OwError("give exactly one of --overleaf PROJECT_ID, --git URL or --folder DIR")
+    folder = None
+    if args.overleaf:
+        pid = re.sub(r"^.*/project/|^https://git\.overleaf\.com/", "", args.overleaf).strip("/")
+        backend, remote_name, url, web = "overleaf", "overleaf", f"https://git.overleaf.com/{pid}", \
+            f"https://www.overleaf.com/project/{pid}"
+    elif args.remote:  # a stand-in for Overleaf (tests): its commits behave like Overleaf's
+        backend, remote_name, url, web = "overleaf", "overleaf", args.remote, ""
+    elif args.git:
+        backend, remote_name, url, web = "git", "origin", args.git, ""
+    else:
+        folder = Path(args.folder).expanduser().resolve()
+        if not folder.is_dir():
+            raise OwError(f"no folder {folder}")
+        backend, remote_name, url, web = "folder", "folder", str(d / "folder.git"), ""
+    owner = PROFILE.get("name") or git(Path.cwd(), "config", "--global", "user.name", check=False).strip()
+    email = PROFILE.get("email") or git(Path.cwd(), "config", "--global", "user.email", check=False).strip()
+    d.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    if folder:
+        git(d, "init", "--quiet", "--bare", "--initial-branch=master", "folder.git")
+        cfg_tmp = {"backend": "folder", "folder": str(folder), "branch": "master", "owner_name": owner,
+                   "remote_name": remote_name, "main": args.main}
+        (d / "project.json").write_text(json.dumps(cfg_tmp), encoding="utf-8")
+        try:
+            folder_sync_in(Project(slug))
+        except OwError:
+            shutil.rmtree(d, ignore_errors=True)
+            raise
+    print(f"cloning {mask_url(url)} …", file=sys.stderr)
+    proc = subprocess.run(["git", "clone", "--quiet", "--origin", remote_name, url, str(d / "repo")], env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        shutil.rmtree(d, ignore_errors=True)
+        hint = ""
+        if re.search(r"username|password|authenticat|denied|40[13]", proc.stderr, re.I):
+            hint = (f"\nThe paper needs your git credentials. Store them once, from your own terminal: git ls-remote {mask_url(url)}"
+                    + ("\n(username: git; password: a git authentication token from Overleaf, Account settings, Git integration)."
+                       if backend == "overleaf" else "") + "\nThen run init again. pairtex never asks for or stores them.")
+        raise OwError("clone failed: " + mask_url(proc.stderr.strip()) + hint, EXIT_REMOTE)
+    repo = d / "repo"
+    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    if backend == "overleaf" and not owner:
+        # The Overleaf account behind the project's web edits.
+        web_author = git(repo, "log", "-1", "--format=%an%x09%ae", "--fixed-strings", f"--grep={WEB_MESSAGE}",
+                         check=False).strip()
+        if "\t" in web_author:
+            owner, email = web_author.split("\t", 1)
+    if owner and not git(repo, "config", "user.name", check=False).strip():
+        git(repo, "config", "user.name", owner)
+        if email:
+            git(repo, "config", "user.email", email)
+    # Ids of coauthors' loops already in the paper (their notes name them): recognise their threads.
+    foreign = set()
+    for f in git(repo, "ls-files", "-z").split("\0"):
+        if f.endswith(".tex") and (repo / f).is_file():
+            for cid in NOTE_RE.findall((repo / f).read_text(encoding="utf-8", errors="replace")):
+                foreign.add(re.sub(r"\d+$", "", cid))
+    prefix = args.id_prefix or PROFILE.get("id_prefix") or "c"
+    foreign.discard(prefix)
+    cfg = {"slug": slug, "title": args.title or slug, "backend": backend, "remote_name": remote_name,
+           "remote_url": url, "web_url": web, "branch": branch, "main": args.main, "watch": args.watch or ["*.tex"],
+           "owner_name": owner, "id_prefix": prefix, "protected_macros": args.protect or [], "interval": 8, "settle": 12,
+           "terminator": PROFILE.get("terminator", ".."), "notes": PROFILE.get("notes", "visible"),
+           "base_style": args.base_style or [], "context_files": [], "created": now_iso()}
+    if folder:
+        cfg["folder"] = str(folder)
+    if foreign:
+        cfg["coauthor_prefixes"] = sorted(foreign)
+    if args.compiler:
+        cfg["compiler"] = args.compiler
+    (d / "project.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    notes = d / "NOTES.md"
+    if not notes.exists():
+        tpl = TEMPLATES / "NOTES.template.md"
+        body = tpl.read_text(encoding="utf-8") if tpl.exists() else "# {title}: project notes\n\n- Main file: `{main}`\n"
+        notes.write_text(body.replace("{title}", cfg["title"]).replace("{main}", args.main or "?"), encoding="utf-8")
+    p = Project(slug)
+    st = empty_state()
+    h = head(repo)
+    st.update(remote_head=h, window_commit=h, last_merged=h)
+    save_state(p, st)
+    n = len(scan(p)["opens"])
+    print(f"project {slug} ({backend}): {repo} at {short(h)} on {branch}; {len(p.tex_files())} watched .tex files; "
+          f"{n} open comment(s) waiting; comments by {owner or 'anyone'} are answered, ids {prefix}1, {prefix}2, …")
+    if not owner:
+        print("note: no author name is known (set it with `pairtex setup --name`), so this loop answers every comment.")
+    return 0
+
+
+def cmd_watch(args) -> int:
+    p = Project(args.slug)
+    acquire_lock(p, args.takeover)
+    st = load_state(p)
+    interval = args.interval if args.interval is not None else p.interval
+    settle = args.settle if args.settle is not None else p.settle
+    rule = (f"once it ends with \"{p.terminator}\"" if p.terminator else f"after {settle:g}s without changes")
+    whose = (f"{p.owner}'s comments" + (f" and {', '.join(p.comments_from)}'s" if p.comments_from else "")) \
+        if p.owner else "every comment"
+    print(f"watching {p.slug} ({p.where()}) every {interval:g}s for {whose}; a comment is sent {rule}.",
+          file=sys.stderr, flush=True)
+    for w in double_answered(p):
+        print(f"warning: {w}.", file=sys.stderr, flush=True)
+    unanswered = [cid for cid, c in st["comments"].items() if c["status"] in ("sent", "resolved")]
+    if unanswered:
+        print(f"note: {', '.join(unanswered)} were sent earlier and are still unanswered (`pairtex show {p.slug}`); "
+              f"they will not be sent again.", file=sys.stderr, flush=True)
+    failures, scanned, last_change = 0, None, time.time()
+    started = time.time()
+    while True:
+        try:
+            remote = remote_head(p)
+            failures = 0
+        except GitError as exc:
+            failures += 1
+            print(f"[{now_iso()}] remote check failed ({failures}): {exc}", file=sys.stderr, flush=True)
+            if failures >= args.max_failures:
+                hint = ("If the message mentions authentication, the Overleaf git token needs refreshing in the "
+                        "git credential store (username git, password the token; host git.overleaf.com)."
+                        if p.backend == "overleaf" else "Check the remote's address and git credentials."
+                        if p.backend == "git" else f"Check that {p.folder} exists and can be read.")
+                print(f"pairtex: cannot reach {p.label} for {p.slug} after {failures} tries: {exc}\n{hint}")
+                save_state(p, st)
+                return EXIT_REMOTE
+            time.sleep(min(120.0, interval * 2 ** failures))
+            continue
+        if remote != head(p.repo) or scanned is None:
+            changed = integrate(p, st, remote)
+            st["remote_head"] = remote
+            scanned = scan(p)
+            if changed:
+                last_change = time.time()
+            closed = detect_closed(p, st, scanned)
+            append_events(p, st, closed)
+            save_state(p, st)
+        t = time.time()
+        present = {c["fp"] for c in scanned["opens"]}
+        sent = {c["fp"]: cid for cid, c in st["comments"].items() if c.get("status") == "sent"}
+        others = st.setdefault("others", {})  # comments by people this loop does not answer: fp -> author
+        for fp in list(st["drafts"]):
+            if fp not in present:
+                del st["drafts"][fp]
+        for fp in list(others):
+            if fp not in present:
+                del others[fp]
+        fresh_src = []
+        for c in scanned["opens"]:
+            if c["fp"] in sent or (c["fp"] in others and not p.answers(others[c["fp"]])):
+                continue
+            if p.terminator:  # the author's ".." says the comment is finished
+                if c.get("ready"):
+                    fresh_src.append(c)
+                continue
+            first = st["drafts"].setdefault(c["fp"], t)
+            if t - first >= settle:
+                fresh_src.append(c)
+        for fp, cid in sent.items():  # a sent comment the author rewrote or deleted before it was answered
+            if fp not in present and cid not in scanned["thread_ids"]:
+                st["comments"][cid]["status"] = "withdrawn"
+        mine = []
+        for c in fresh_src:
+            author = others.pop(c["fp"], None) or comment_author(p, c)
+            if p.answers(author):
+                mine.append((c, author))
+            else:  # a coauthor's comment: their own loop (or they) will handle it
+                others[c["fp"]] = author
+                st["drafts"].pop(c["fp"], None)
+        if mine:
+            fresh = []
+            for c, author in mine:
+                cid = f"{p.prefix}{st['next_id']}"
+                st["next_id"] += 1
+                rec = comment_record(p, c, cid, author)
+                st["comments"][cid] = rec
+                st["drafts"].pop(c["fp"], None)
+                fresh.append(rec)
+            text = emit_batch(p, st, fresh, "new comments")
+            save_state(p, st)
+            sys.stdout.write(text)
+            return EXIT_BATCH
+        if (args.learn_every and len(st.get("pending_events", [])) >= args.learn_every and t - last_change > 60
+                and len(read_events(st["pending_events"])) >= args.learn_every):
+            text = emit_batch(p, st, [], f"{len(st['pending_events'])} style events waiting")
+            save_state(p, st)
+            sys.stdout.write(text)
+            return EXIT_BATCH
+        if args.once:
+            save_state(p, st)
+            if p.terminator:
+                drafts = sum(1 for c in scanned["opens"] if not c.get("ready"))
+                print(f"no comment ready in {p.slug}" + (f" ({drafts} without the closing {p.terminator})" if drafts else ""))
+            else:
+                drafts = len(st["drafts"])
+                print(f"no comment ready in {p.slug}" + (f" ({drafts} still being written)" if drafts else ""))
+            return EXIT_NOTHING
+        if args.max_hours and t - started > args.max_hours * 3600:
+            save_state(p, st)
+            print(f"pairtex: watched {p.slug} for {args.max_hours:g} h without a comment; stopped.")
+            return EXIT_NOTHING
+        save_state(p, st)
+        idle = t - last_change > 600
+        time.sleep(interval * (2.5 if idle else 1.0))
+
+
+def double_answered(p: Project) -> list[str]:
+    """Coauthors listed in comments_from whose own loop already writes notes in the paper: both loops would answer
+    their comments."""
+    seen: dict[str, set] = {}
+    for f in p.tex_files():
+        for m in re.finditer(r"\\claude\s*\[([^\]\n]*)\]\s*\{([a-z]{1,8})\d+\}", code_only(p.read(f))):
+            if m.group(2) != p.prefix:
+                seen.setdefault(m.group(1), set()).add(m.group(2))
+    return [f"{name} ({h}) runs a loop of their own on this paper (notes {', '.join(sorted(seen[h]))}…): remove them "
+            f"from comments_from, or both loops will answer their comments" for name, h in p.comments_from.items()
+            if h in seen]
+
+
+def find_open(p: Project, rec: dict) -> dict | None:
+    if not (p.repo / rec["file"]).exists():
+        return None
+    opens, _ = scan_file(rec["file"], p.read(rec["file"]), p.terminator)
+    same = [c for c in opens if c["text"] == rec["text"]]
+    if not same:
+        return None
+    exact = [c for c in same if c["occ"] == rec.get("occ", 0)]
+    if exact:
+        return exact[0]
+    return min(same, key=lambda c: abs(c["start"] + 1 - rec["line"]))
+
+
+def cmd_resolve(args) -> int:
+    p = Project(args.slug)
+    ensure_not_watching(p)
+    st = load_state(p)
+    cid = p.prefix + args.cid if args.cid.isdigit() else args.cid
+    rec = st["comments"].get(cid)
+    if not rec:
+        raise OwError(f"no comment {cid} in {p.slug}")
+    if rec["status"] not in ("sent", "resolved"):
+        raise OwError(f"{cid} is {rec['status']}; only sent comments can be resolved")
+    reply = args.reply if args.reply is not None else ""
+    if args.reply_file:
+        reply = Path(args.reply_file).read_text(encoding="utf-8")
+    reply = reply.strip()
+    if not reply:
+        raise OwError("give a reply: what changed, in a sentence or two (or the answer to the question)")
+    who = rec.get("handle") or p.handle
+    c = find_open(p, rec)
+    if c is None:
+        raise OwError(f"{cid} is no longer in {rec['file']} as written. {who} may have edited or deleted it; run "
+                      f"`pairtex show {p.slug}` and look at the source before replying.")
+    mark = rec.get("mark", "@")
+    question = rec.get("kind") == "question"
+    # 1. Attribute the edits made since the checkpoint to this comment.
+    base = st.get("checkpoint") or tree_of(p.repo, "HEAD")
+    now_tree = stage_tree(p.repo)
+    changes = []
+    for f in changed_files(p.repo, base, now_tree):
+        if p.watched(f):
+            for before, after in para_changes(file_at(p.repo, base, f) or "", file_at(p.repo, now_tree, f) or "", p.macros):
+                changes.append({"file": f, "before": before, "claude": after})
+    if question and changes and not args.allow_edit:
+        listed = "\n".join(f"  - {ch['file']}: {clip(word_diff(ch['before'], ch['claude']), 300)}" for ch in changes)
+        raise OwError(f"{cid} is a question: answer it without changing the text. These paragraphs changed since the "
+                      f"batch:\n{listed}\nUndo them, or pass --allow-edit only if {who}'s question asked for an edit.",
+                      EXIT_GUARD)
+    # 2. Remove the comment's [[ ]] from the prose, then rewrite its lines into a thread with the reply under it.
+    path = p.repo / rec["file"]
+    lines = path.read_text(encoding="utf-8").split("\n")
+    # The note quotes the bracketed words as the author marked them in the batch, not as the edit left them.
+    quotes = [short_quote(r["text"]) for r in rec["ranges"] if r.get("text", "").strip()] if "ranges" in rec else \
+        [short_quote(r["text"]) for r in c.get("ranges", []) if r["text"].strip()]
+    if c.get("ranges"):
+        toks = []
+        for r in c["ranges"]:
+            toks += [tuple(r["open"]), tuple(r["close"])]
+        for ln, col, n in sorted(toks, reverse=True):
+            lines[ln] = lines[ln][:col] + lines[ln][col + n:]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        c = next((o for o in scan_file(rec["file"], "\n".join(lines), p.terminator)[0] if o["text"] == rec["text"]
+                  and o["start"] == c["start"]), None) or find_open(p, rec)
+        if c is None:
+            raise OwError(f"lost {cid} after removing its brackets; inspect {rec['file']}")
+    about = " ".join(f'"{q}"' for q in quotes)
+    first = lines[c["start"]]
+    k = comment_index(first)
+    indent = re.match(r"\s*", first).group(0)
+    comment_text = c["text"]
+    warn = ""
+    tail = c.get("tail", "") if c["inline"] else ""
+    if c["inline"]:
+        # An inline comment's thread moves under its source line, so the commenter accepts by deleting whole lines. A mid-line
+        # comment's hidden words should be back in the prose by now.
+        disp = (rec.get("midline") or {}).get("displaced")
+        if tail or (rec.get("midline") or {}).get("tail"):
+            # The words the author wrote after the comment's "..": put them back after the comment's point, unless the
+            # edit already has them in the paragraph.
+            a, b = paragraph_span(lines, c["start"])
+            prose = " ".join(" ".join(prose_paragraphs("\n".join(lines[a:b]), p.macros)).split())
+            if tail and " ".join(" ".join(prose_paragraphs(tail, p.macros)).split()) in prose:
+                tail = ""
+        elif disp:
+            a, b = paragraph_span(lines, c["start"])
+            prose = " ".join(" ".join(prose_paragraphs("\n".join(lines[a:b]), p.macros)).split())
+            want = " ".join(" ".join(prose_paragraphs(disp, p.macros)).split())
+            if want in prose:
+                comment_text = rec["midline"]["comment"].rstrip(" ,;:") or comment_text
+            else:
+                warn = (f"\nwarning: the words that {cid}'s mid-line comment hid (\"{disp}\") are not back in the prose; "
+                        f"they survive only in the thread. Restore them and push again.")
+    reply_lines = [r.strip() for r in reply.split("\n") if r.strip()]
+    visible = p.notes == "visible" and not args.plain and note_safe(lines, c["start"])
+    ds = note_def_state(p, rec["file"]) if visible else None
+    cjk = cjk_printable(p)
+    if visible:
+        flat_reply = " ".join(reply_lines)
+        if not renderable("".join(UNICODE_TEX.get(ch, ch) for ch in flat_reply), cjk):
+            raise OwError("the reply goes into the PDF as a note: write it with ASCII or LaTeX (math in $...$), "
+                          f"without characters {compiler_for(p, p.main)} cannot print in this paper.")
+        said = " ".join(comment_text.split())
+        pre = []
+        if renderable(said, cjk):
+            said_tex = tex_text(said, tuple(p.macros))
+        else:  # e.g. Chinese under pdfLaTeX: kept verbatim in a % line above the note, which LaTeX never reads
+            pre = [f"{indent}%{mark}{cid} {said}"]
+            said_tex = "\\emph{(the line above)}"
+        shown_quotes = [q.replace("…", "...") for q in quotes if renderable(q, cjk) and q.count("$") % 2 == 0]
+        about_tex = ""
+        if shown_quotes:
+            about_tex = "\\emph{" + " ".join(f"``{tex_text(q, tuple(p.macros), source=True)}''" for q in shown_quotes) + "} "
+        handle = rec.get("handle") or p.handle
+        name = "" if not ds or handle == ds["default"] else f"[{handle}]"
+        new_lines = pre + [f"{indent}\\claude{name}{{{cid}}}{{{about_tex}{said_tex}}}{{{tex_text(flat_reply, tuple(p.macros))}}}"]
+    else:
+        texts = comment_text.split("\n")
+        new_lines = [f"{indent}%{mark}{cid} {(about + ' ') if about and n == 0 else ''}{t.strip()}".rstrip()
+                     for n, t in enumerate(texts)]
+        new_lines += [f"{indent}%{mark}{cid}> {r}".rstrip() for r in reply_lines]
+    if c["inline"]:
+        lines[c["start"]:c["end"]] = [join_prose(first[:k], tail)] + new_lines
+    else:
+        lines[c["start"]:c["end"]] = new_lines
+    path.write_text("\n".join(lines), encoding="utf-8")
+    shown = "a note in the PDF" if visible else "% thread lines"
+    if visible and ds:
+        ensure_note_def(p, ds, rec.get("handle") or p.handle)
+    elif visible:
+        warn += "\nwarning: no \\begin{document} found to define \\claude; add the definition or resolve with --plain."
+    st["checkpoint"] = stage_tree(p.repo)
+    rec.update(status="resolved", reply=reply, changes=[] if question and not changes else changes, resolved_at=now_iso(),
+               shown="note" if visible else "source")
+    save_state(p, st)
+    words = sum(len(ch["claude"].split()) for ch in changes)
+    print(f"{cid} resolved: {len(changes)} paragraph change(s), {words} words of new text; the thread is now {shown} "
+          f"in {rec['file']}.{warn}")
+    return 0
+
+
+def latex_errors(log: Path) -> list[tuple[str, int, str]]:
+    if not log.exists():
+        return []
+    errs = []
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"^(\S.*?\.(?:tex|sty|cls|bbl)):(\d+): (.*)$", line)
+        if m:
+            path = re.sub(r"^\./", "", m.group(1))
+            errs.append((path, int(m.group(2)), m.group(3).strip()))
+    return errs
+
+
+ENGINES = {"pdflatex": "-pdf", "xelatex": "-xelatex", "lualatex": "-lualatex"}
+PDF_MODES = {"1": "pdflatex", "4": "lualatex", "5": "xelatex"}
+
+
+def compiler_for(p: Project, main: str | None, src: Path | None = None) -> str:
+    """The project's engine: project.json "compiler", else a "% !TEX program = xelatex" line at the top of the main
+    file, else $pdf_mode in the project's latexmkrc, else pdfLaTeX (Overleaf's default)."""
+    if p.cfg.get("compiler") in ENGINES:
+        return p.cfg["compiler"]
+    src = src or p.repo
+    if main and (src / main).exists():
+        for line in (src / main).read_text(encoding="utf-8", errors="replace").split("\n")[:30]:
+            m = re.match(r"\s*%\s*!\s*TEX\s+(?:TS-)?program\s*=\s*(\w+)", line, re.I)
+            if m and m.group(1).lower() in ENGINES:
+                return m.group(1).lower()
+    for rc in ("latexmkrc", ".latexmkrc"):
+        if (src / rc).exists():
+            m = re.search(r"\$pdf_mode\s*=\s*(\d)", (src / rc).read_text(encoding="utf-8", errors="replace"))
+            if m and m.group(1) in PDF_MODES:
+                return PDF_MODES[m.group(1)]
+    return "pdflatex"
+
+
+def cjk_printable(p: Project) -> bool:
+    """XeLaTeX or LuaLaTeX with a CJK package prints Chinese, Japanese and Korean text in notes."""
+    if compiler_for(p, p.main) == "pdflatex" or not p.main or not (p.repo / p.main).exists():
+        return False
+    pre = p.read(p.main).split("\\begin{document}")[0]
+    return bool(re.search(r"\\(?:usepackage|documentclass)\s*(?:\[[^\]]*\])?\s*\{[^}]*\b(?:ctex\w*|xeCJK|luatexja)\b",
+                          code_only(pre)))
+
+
+def code_only(text: str) -> str:
+    return "\n".join(code_part(l) for l in text.split("\n"))
+
+
+def run_latex(p: Project, src: Path, main: str, outdir: Path) -> tuple[int, list[tuple[str, int, str]], str]:
+    outdir.mkdir(parents=True, exist_ok=True)
+    engine = ENGINES[compiler_for(p, main, src)]
+    cmd = ["latexmk", engine, "-interaction=nonstopmode", "-file-line-error", "-f", f"-outdir={outdir}", main]
+    try:
+        proc = subprocess.run(cmd, cwd=str(src), capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return 124, [], "latexmk timed out after 600 s"
+    log = outdir / (Path(main).stem + ".log")
+    return proc.returncode, latex_errors(log), (proc.stdout + proc.stderr)[-1500:]
+
+
+def pdf_pages(log: Path) -> int | None:
+    if not log.exists():
+        return None
+    m = re.findall(r"Output written on .*?\((\d+) pages?", log.read_text(encoding="utf-8", errors="replace"), re.S)
+    return int(m[-1]) if m else None
+
+
+def mains_for(p: Project, files: list[str]) -> list[str]:
+    mains = set()
+    for f in files:
+        if not f.endswith(".tex") or not (p.repo / f).exists():
+            continue
+        if "\\documentclass" in p.read(f):
+            mains.add(f)
+        elif p.main:
+            mains.add(p.main)
+    return sorted(mains)
+
+
+def compile_check(p: Project, files: list[str], base_rev: str) -> tuple[bool, str]:
+    if not shutil.which("latexmk"):
+        return True, "latexmk is not installed: compile check skipped"
+    report, ok = [], True
+    for main in mains_for(p, files):
+        stem = re.sub(r"[^A-Za-z0-9]+", "-", main)
+        code, errs, tail = run_latex(p, p.repo, main, p.build / stem)
+        if not errs and (code == 0 or (p.build / stem / (Path(main).stem + ".pdf")).exists()):
+            pages = pdf_pages(p.build / stem / (Path(main).stem + ".log"))
+            report.append(f"{main}: compiles ({compiler_for(p, main)}" +
+                          (f", {pages} page{'s' if pages != 1 else ''})" if pages else ")"))
+            continue
+        # Compare with the version before this push: only new errors block.
+        base_src = p.build / "base-src"
+        shutil.rmtree(base_src, ignore_errors=True)
+        base_src.mkdir(parents=True)
+        data = subprocess.run(["git", "archive", base_rev], cwd=str(p.repo), capture_output=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            tar.extractall(base_src)
+        _, base_errs, _ = run_latex(p, base_src, main, p.build / (stem + "-base"))
+        known = {}
+        for e in base_errs:
+            known[(e[0], e[2])] = known.get((e[0], e[2]), 0) + 1
+        new = []
+        for e in errs:
+            key = (e[0], e[2])
+            if known.get(key, 0) > 0:
+                known[key] -= 1
+            else:
+                new.append(e)
+        if new:
+            ok = False
+            report.append(f"{main}: {len(new)} new LaTeX error(s) ({p.label}'s version had {len(base_errs)}):")
+            report += [f"  {f}:{n}: {msg}" for f, n, msg in new[:12]]
+        elif errs:
+            report.append(f"{main}: {len(errs)} LaTeX error(s), all already present in {p.label} before this push")
+        else:
+            report.append(f"{main}: latexmk exit {code} without a located error; last output:\n{tail}")
+    return ok, "\n".join(report) or "no .tex file changed: nothing to compile"
+
+
+def push_guards(p: Project, st: dict, args, staged: list[str]) -> list[str]:
+    """No stray new files, no lost coauthor notes, no lost threads, no new LaTeX errors. Returns changed paths."""
+    repo = p.repo
+    added = [l.split("\t", 1)[1] for l in staged if l.startswith("A")]
+    if added and not args.add_new:
+        raise OwError(f"new files would be published to {p.label}:\n  " + "\n  ".join(added) +
+                      "\nRemove them, or pass --add-new if the author wants them in the project.", EXIT_GUARD)
+    changed = [l.split("\t")[-1] for l in staged]
+    if p.macros and not args.allow_note_removal:
+        lost = []
+        for f in changed:
+            if f.endswith(".tex"):
+                before = macro_bodies(file_at(repo, "HEAD", f) or "", p.macros)
+                after = macro_bodies((repo / f).read_text(encoding="utf-8") if (repo / f).exists() else "", p.macros)
+                for b in before:
+                    if b in after:
+                        after.remove(b)
+                    else:
+                        lost.append(f"{f}: {clip(b, 160)}")
+        if lost:
+            raise OwError("this push removes or rewrites protected coauthor notes:\n  " + "\n  ".join(lost) +
+                          "\nRestore them, or pass --allow-note-removal if the comment asked for it.", EXIT_GUARD)
+    live = set(scan(p)["thread_ids"])
+    missing = [t for t in st.get("batch_threads", []) if t not in live]
+    if missing and not args.allow_thread_removal:
+        raise OwError(f"threads {', '.join(missing)} were deleted in the checkout. Only the commenter deletes threads; "
+                      f"restore their lines (or pass --allow-thread-removal if the comment asked for it).", EXIT_GUARD)
+    if not args.no_compile:
+        ok, report = compile_check(p, changed, "HEAD")
+        print(report)
+        if not ok:
+            raise OwError("fix the errors above and run `pairtex push` again (nothing was committed)", EXIT_COMPILE)
+    return changed
+
+
+def cmd_push(args) -> int:
+    p = Project(args.slug)
+    ensure_not_watching(p)
+    st = load_state(p)
+    repo = p.repo
+    stage_tree(repo)
+    staged = [l for l in git(repo, "diff", "--cached", "--name-status").splitlines() if l.strip()]
+    remote_ref = f"{p.remote}/{p.branch}"
+    if not staged and is_ancestor(repo, "HEAD", remote_ref):
+        print("nothing to publish")
+        return EXIT_NOTHING
+    try:
+        changed = push_guards(p, st, args, staged)
+    except OwError:
+        git(repo, "reset", "--quiet")  # leave the edits unstaged, as the agent left them
+        raise
+    resolved = sorted((cid for cid, c in st["comments"].items() if c["status"] == "resolved"), key=id_num)
+    if staged:
+        msg = args.message or ("Answer " + ", ".join(resolved) if resolved else "Edit")
+        subject = f"{OW_PREFIX} {', '.join(resolved) + ': ' if resolved and not msg.startswith('Answer') else ''}{msg}"
+        trailer = args.trailer if args.trailer is not None else TRAILER
+        git(repo, "commit", "--quiet", "-m", subject, *(["-m", trailer] if trailer else []))
+    pre_remote = git(repo, "rev-parse", remote_ref).strip()
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    for attempt in range(1, 6):
+        lock = folder_lock(p) if p.backend == "folder" else None
+        try:
+            if lock:
+                folder_sync_in(p, locked=True)  # the author's latest save is the base to merge onto
+            git(repo, "fetch", "--quiet", p.remote, p.branch, timeout=240)
+            remote = git(repo, "rev-parse", remote_ref).strip()
+            if not is_ancestor(repo, remote, "HEAD"):
+                rb = subprocess.run(["git", "rebase", "--quiet", remote], cwd=str(repo), env=env, capture_output=True,
+                                    text=True)
+                if rb.returncode != 0:
+                    subprocess.run(["git", "rebase", "--abort"], cwd=str(repo), env=env, capture_output=True)
+                    if not line_merge(p, remote):
+                        return conflict(p, st, remote, resolved)
+            if lock and not folder_write_out(p, "HEAD"):
+                continue  # the author saved again between the snapshot and the write: merge onto that save
+            pr = subprocess.run(["git", "push", "--quiet", p.remote, f"HEAD:refs/heads/{p.branch}"], cwd=str(repo),
+                                env=env, capture_output=True, text=True, timeout=240)
+            if pr.returncode == 0:
+                break
+            err = mask_url((pr.stderr or pr.stdout).strip())
+            if lock:  # cannot happen while the lock is held; put the folder back as it was
+                folder_write_out(p, "HEAD", target=remote)
+                raise OwError(f"push to the folder's history failed: {err}", EXIT_REMOTE)
+            if attempt == 5 or not re.search(r"rejected|non-fast-forward|fetch first|updates were rejected", err, re.I):
+                raise OwError(f"push failed: {err}", EXIT_REMOTE)
+        finally:
+            if lock:
+                lock.close()
+        time.sleep(1.5 * attempt)
+    else:
+        raise OwError(f"{p.label} kept changing while publishing; nothing was published. Run `pairtex push` again.",
+                      EXIT_REMOTE)
+    new_head = head(repo)
+    pushed = git(repo, "rev-list", f"{pre_remote}..{new_head}").split()
+    ours_new = [s for s in pushed if git(repo, "log", "-1", "--format=%s", s).startswith(OW_PREFIXES)]
+    st["ours"] = (st.get("ours", []) + ours_new)[-400:]
+    paras = st.get("ours_paras", {})
+    for sha in ours_new:
+        for f in changed_files(repo, f"{sha}^", sha):
+            if p.watched(f):
+                for _, new in para_changes(file_at(repo, f"{sha}^", f) or "", file_at(repo, sha, f) or "", p.macros):
+                    if new:
+                        owner = next((cid for cid in resolved if any(ch["claude"] == new for ch in st["comments"][cid].get("changes", []))), None)
+                        paras[sha1(new)] = {"text": new, "cid": owner, "at": now_iso()}
+    st["ours_paras"] = dict(list(paras.items())[-600:])
+    for cid in resolved:
+        st["comments"][cid].update(status="pushed", pushed_commit=new_head, pushed_at=now_iso())
+    st["remote_head"] = new_head
+    st["last_merged"] = new_head
+    st["checkpoint"] = tree_of(repo, "HEAD")
+    st["batch_threads"] = scan(p)["thread_ids"]
+    save_state(p, st)
+    url = p.where()
+    print(f"published {short(new_head)} to {url}" + (f" · answered {', '.join(resolved)}" if resolved else ""))
+    return 0
+
+
+def merge3(base: str, ours: str, theirs: str) -> str | None:
+    """Line-level three-way merge that, unlike git, accepts edits on adjacent lines. None on a real overlap."""
+    b = base.split("\n")
+
+    def edits(x: str) -> list[tuple[int, int, tuple]]:
+        xs = x.split("\n")
+        sm = difflib.SequenceMatcher(None, b, xs, autojunk=False)
+        return [(i1, i2, tuple(xs[j1:j2])) for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
+
+    def clash(e, f) -> bool:
+        (a1, a2, _), (b1, b2, _) = e, f
+        if a1 == a2 and b1 == b2:
+            return a1 == b1
+        if a1 == a2:
+            return b1 < a1 < b2
+        if b1 == b2:
+            return a1 < b1 < a2
+        return max(a1, b1) < min(a2, b2)
+
+    eo, et = edits(ours), edits(theirs)
+    merged = list(eo)
+    for e in et:
+        if e in eo:
+            continue
+        if any(clash(e, f) for f in eo):
+            return None
+        merged.append(e)
+    merged.sort(key=lambda e: (e[0], e[1] > e[0]))
+    out, pos = [], 0
+    for i1, i2, rep in merged:
+        out.extend(b[pos:i1])
+        out.extend(rep)
+        pos = i2
+    out.extend(b[pos:])
+    return "\n".join(out)
+
+
+def line_merge(p: Project, remote: str) -> bool:
+    """Replay the local commits on top of Overleaf's newer version with merge3. False if any file truly conflicts."""
+    repo = p.repo
+    ours = head(repo)
+    mb = git(repo, "merge-base", ours, remote).strip()
+    message = git(repo, "log", "-1", "--format=%B", ours)
+    theirs_files = set(changed_files(repo, mb, remote))
+    merged: dict[str, str] = {}
+    take_ours = []
+    for f in changed_files(repo, mb, ours):
+        if f not in theirs_files:
+            take_ours.append(f)
+            continue
+        b, o, t = file_at(repo, mb, f), file_at(repo, ours, f), file_at(repo, remote, f)
+        if b is None or o is None or t is None:
+            return False
+        m = merge3(b, o, t)
+        if m is None:
+            return False
+        merged[f] = m
+    git(repo, "reset", "--hard", "--quiet", remote)
+    for f in take_ours:
+        if git_ok(repo, "cat-file", "-e", f"{ours}:{f}"):
+            git(repo, "checkout", ours, "--", f)
+        else:
+            git(repo, "rm", "--quiet", "--ignore-unmatch", "--", f)
+    for f, text in merged.items():
+        (repo / f).write_text(text, encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "--quiet", "-m", message.strip())
+    return True
+
+
+def conflict(p: Project, st: dict, remote: str, resolved: list[str]) -> int:
+    repo = p.repo
+    cdir = p.dir / "conflicts"
+    cdir.mkdir(exist_ok=True)
+    patch = cdir / (dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".patch")
+    patch.write_text(git(repo, "diff", remote, "HEAD"), encoding="utf-8")
+    git(repo, "reset", "--hard", "--quiet", remote)
+    st["last_merged"] = remote
+    st["remote_head"] = remote
+    for cid in resolved:
+        st["comments"][cid].update(status="sent", changes=[], reply="")
+        st["comments"][cid].pop("resolved_at", None)
+    st["checkpoint"] = tree_of(repo, "HEAD")
+    st["batch_threads"] = scan(p)["thread_ids"]
+    save_state(p, st)
+    print(f"Someone edited the same lines in {p.label} while you worked, so nothing was published.\n"
+          f"Your edits are saved in {patch}; the checkout now matches {p.label} ({short(remote)}).\n"
+          f"Redo {', '.join(resolved) or 'the edits'} on the new text (use the patch as a guide), resolve again, and push.")
+    return EXIT_CONFLICT
+
+
+def mark_events(ids: set, key: str, value: dict) -> int:
+    """Flag events in evidence.jsonl, under its lock: "discarded" (not the author's writing) or "acked" (learned). Flagged
+    events leave every batch at once; a running watcher drops them from its queue at its next batch."""
+    flagged = 0
+    with open(STYLE_DIR / ".evidence.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows = EVIDENCE.read_text(encoding="utf-8").splitlines() if EVIDENCE.exists() else []
+        out = []
+        for line in rows:
+            if line.strip():
+                e = json.loads(line)
+                if e.get("id") in ids:
+                    e[key] = value
+                    flagged += 1
+                line = json.dumps(e, ensure_ascii=False)
+            out.append(line)
+        tmp = EVIDENCE.with_suffix(".tmp")
+        tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        os.replace(tmp, EVIDENCE)
+    return flagged
+
+
+def learn_unattached(args) -> int:
+    """`pairtex learn` without a paper: the evidence that belongs to no paper (seeds), and with --all a count per paper."""
+    if args.discard or args.ack:
+        ids = {x.strip() for a in (args.discard or args.ack) for x in a.split(",") if x.strip()}
+        if args.discard:
+            if not args.why.strip():
+                raise OwError("say why with --why: discarded evidence keeps the reason")
+            print(f"discarded {mark_events(ids, 'discarded', {'why': args.why.strip(), 'date': now_iso()})} event(s)")
+        else:
+            print(f"acknowledged {mark_events(ids, 'acked', {'date': now_iso()})} event(s)")
+        return 0
+    events = [e for e in all_events() if e.get("project") is None and not e.get("acked") and not e.get("discarded")]
+    if args.json:
+        print(json.dumps(events, indent=1, ensure_ascii=False))
+        return 0
+    if args.all and PROJECTS.exists():
+        for d in sorted(PROJECTS.iterdir()):
+            if (d / "project.json").exists():
+                n = len(read_events(load_state(Project(d.name)).get("pending_events", [])))
+                if n:
+                    print(f"{d.name}: {n} event(s) waiting; see them with: pairtex learn {d.name}")
+    if not events:
+        print("no seed evidence waiting" + ("" if args.all else " (a paper's evidence: pairtex learn <slug>)"))
+        return 0
+    for e in events:
+        if e.get("kind") == "seed":
+            d = SEED_DIR / e.get("seed", "")
+            print(f"### {e['id']} · seed · {e.get('seed')} · {e.get('title', '')[:80]} ({e.get('source')}, {e.get('words')} words)")
+            print(f"Samples: {d / 'samples.md'}   Stats: {d / 'stats.json'}")
+        else:
+            print(f"### {e['id']} · {e.get('kind')}")
+        print()
+    print(f"Distil these into {STYLE_MD} (references/seeding.md), then: pairtex learn --ack " + " ".join(e["id"] for e in events))
+    return 0
+
+
+def cmd_learn(args) -> int:
+    if not args.slug:
+        return learn_unattached(args)
+    p = Project(args.slug)
+    if args.discard or args.ack:
+        if args.discard:
+            ids = {x.strip() for a in args.discard for x in a.split(",") if x.strip()}
+            if not args.why.strip():
+                raise OwError("say why with --why: discarded evidence keeps the reason")
+            done = f"discarded {mark_events(ids, 'discarded', {'why': args.why.strip(), 'date': now_iso()})} event(s)"
+        else:
+            ids = {x.strip() for a in args.ack for x in a.split(",") if x.strip()}
+            done = f"acknowledged {mark_events(ids, 'acked', {'date': now_iso()})} event(s)"
+        if lock_owner(p):  # the watcher owns state.json; it drops these from its queue at its next batch
+            print(done + "; the watcher drops them from its queue at its next batch")
+            return 0
+        st = load_state(p)
+        st["pending_events"] = [e for e in st.get("pending_events", []) if e not in ids]
+        save_state(p, st)
+        print(done + f"; {len(read_events(st['pending_events']))} still pending")
+        return 0
+    st = load_state(p)
+    if not args.no_sync and not lock_owner(p):
+        try:
+            remote = remote_head(p)
+            integrate(p, st, remote)
+            st["remote_head"] = remote
+            append_events(p, st, detect_closed(p, st, scan(p)))
+            append_events(p, st, own_edit_events(p, st))
+            save_state(p, st)
+        except OwError as exc:
+            print(f"(not synced: {exc})", file=sys.stderr)
+    events = read_events(st.get("pending_events", []))
+    if not events:
+        print("no writing-style evidence waiting")
+        return 0
+    if args.json:
+        print(json.dumps(events, indent=1, ensure_ascii=False))
+        return 0
+    who = p.handle
+    for e in events:
+        print(f"### {e['id']} · {e['kind']} · {e.get('cid') or ''} · {e.get('file', '')} · {e.get('section', '')}")
+        if e.get("comment"):
+            print(f"Comment: {e['comment']}")
+        if e.get("reply"):
+            print(f"Reply: {e['reply']}")
+        if e["kind"] == "closed":
+            print(f"Outcome: {e['outcome']}")
+            for r in e.get("changes", []):
+                print(f"- {r['outcome']}: the agent's edit {r['diff_claude']}")
+                if diff_author(r):
+                    print(f"  {who} then changed it: {diff_author(r)}")
+        elif e["kind"] == "revised":
+            print(f"{who} changed the agent's text: {diff_author(e)}")
+        elif e["kind"] == "own_edit":
+            print(f"{who}'s edit: {e['diff']}")
+        elif e["kind"] == "own_addition":
+            print(f"{who} wrote: {e['after']}")
+        elif e["kind"] == "own_deletion":
+            print(f"{who} deleted: {e['before']}")
+        if e.get("note"):
+            print(f"Note: {e['note']}")
+        print()
+    print(f"Distil these into {STYLE_MD}, then: pairtex learn {p.slug} --ack " + " ".join(e["id"] for e in events))
+    return 0
+
+
+# ------------------------------------------------------------------------------ seed (a style guide from the author's papers)
+
+SEED_DIR = STYLE_DIR / "seed"
+SEED_INPUT_RE = re.compile(r"\\(?:input|include|subfile)\s*\{([^}]+)\}")
+SEED_SECTION_RE = re.compile(r"\\(chapter|section|subsection)\*?\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{[^{}]*\})*)\}")
+TITLE_RE = re.compile(r"\\title\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}", re.S)
+ABSTRACT_RE = re.compile(r"\\begin\{abstract\}(.*?)\\end\{abstract\}", re.S)
+DISPLAY_RE = re.compile(r"\\begin\{(equation|align|gather|multline|eqnarray|displaymath)\*?\}.*?\\end\{\1\*?\}|\\\[.*?\\\]|\$\$.*?\$\$", re.S)
+ABBREV = ("e.g.", "i.e.", "et al.", "etc.", "cf.", "vs.", "Fig.", "Figs.", "Eq.", "Eqs.", "Sec.", "Thm.", "Prop.", "Def.",
+          "resp.", "approx.", "Dr.", "Prof.", "No.")
+HEDGES = ("may", "might", "could", "suggest", "suggests", "likely", "appears", "seems", "arguably", "roughly",
+          "approximately", "typically", "often", "generally", "perhaps", "possibly", "somewhat", "essentially")
+CONNECTIVES = ("however", "moreover", "furthermore", "thus", "hence", "therefore", "in particular", "indeed",
+               "specifically", "in contrast", "instead", "that is", "for example", "for instance", "in fact",
+               "consequently", "note that", "recall that", "intuitively", "formally", "in other words", "as a result")
+PDF_SWIFT = """import PDFKit
+guard let doc = PDFDocument(url: URL(fileURLWithPath: CommandLine.arguments[1])) else { exit(1) }
+for i in 0..<doc.pageCount { if let s = doc.page(at: i)?.string { print(s); print("") } }
+"""
+
+
+def strip_tex_comments(text: str) -> str:
+    """Drop comment-only lines and trailing comments, so a commented-out line neither counts nor splits a paragraph."""
+    out = []
+    for line in text.split("\n"):
+        k = comment_index(line)
+        if k < 0:
+            out.append(line)
+        elif line[:k].strip():
+            out.append(line[:k])
+    return "\n".join(out)
+
+
+def expand_tex(path: Path, root: Path, depth: int = 0) -> str:
+    """A .tex file with its \\input / \\include files spliced in (comments kept; up to 6 levels)."""
+    text = strip_tex_comments(path.read_text(encoding="utf-8", errors="replace"))
+    if depth >= 6:
+        return text
+
+    def sub(m):
+        name = m.group(1).strip()
+        for cand in (root / name, root / (name + ".tex")):
+            if cand.is_file():
+                return expand_tex(cand, root, depth + 1)
+        return ""
+    return SEED_INPUT_RE.sub(sub, text)
+
+
+def find_main_tex(folder: Path) -> Path | None:
+    cands = [p for p in folder.rglob("*.tex") if "\\documentclass" in p.read_text(encoding="utf-8", errors="replace")[:20000]
+             and not any(part.startswith(".") for part in p.relative_to(folder).parts)]
+    if not cands:
+        return None
+    return sorted(cands, key=lambda p: (p.name not in ("main.tex", "paper.tex", "ms.tex"), -p.stat().st_size))[0]
+
+
+def detex(s: str) -> str:
+    """Rough plain text of a LaTeX paragraph, for counting words and sentences."""
+    s = DISPLAY_RE.sub(" MATH. ", s)
+    s = re.sub(r"\$[^$]*\$|\\\(.*?\\\)", "X", s)
+    s = re.sub(r"\\(?:cite[a-z]*|ref|eqref|cref|Cref|autoref|label|url|href)\*?(?:\[[^\]]*\])*\{[^}]*\}", "R", s)
+    s = re.sub(r"\\(?:emph|textbf|textit|textsc|texttt|text|mathrm|underline|footnote)\*?\{((?:[^{}]|\{[^{}]*\})*)\}", r"\1", s)
+    s = re.sub(r"\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?", " ", s)
+    s = s.replace("~", " ").replace("---", " — ").replace("--", "–").replace("``", '"').replace("''", '"')
+    s = re.sub(r"[{}\\]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def sentences(plain: str) -> list[str]:
+    t = plain
+    for i, a in enumerate(ABBREV):
+        t = t.replace(a, a.replace(".", f"\x00{i}\x00"))
+    parts = re.split(r"(?<=[.!?])\s+(?=[\"(]?[A-Z0-9X])", t)
+    out = []
+    for p in parts:
+        p = re.sub(r"\x00\d+\x00", ".", p).strip()
+        if len(p.split()) >= 3:
+            out.append(p)
+    return out
+
+
+def is_prose(par: str) -> bool:
+    if par.startswith("\\begin{") or par.startswith("\\item") or par.startswith("&"):
+        return False
+    plain = detex(par)
+    words = plain.split()
+    if len(words) < 12:
+        return False
+    alpha = sum(1 for w in words if re.match(r"[A-Za-z][a-z'’-]*[a-z.,;:)]?$", w))
+    return alpha / len(words) >= 0.6
+
+
+def pct(xs: list, q: float) -> float:
+    if not xs:
+        return 0.0
+    xs = sorted(xs)
+    return float(xs[min(len(xs) - 1, int(q * (len(xs) - 1) + 0.5))])
+
+
+def per_k(count: int, words: int) -> float:
+    return round(1000.0 * count / max(words, 1), 2)
+
+
+def prose_stats(paras: list[str], raw: str) -> dict:
+    plains = [detex(p) for p in paras]
+    sents = [s for p in plains for s in sentences(p)]
+    words = sum(len(p.split()) for p in plains)
+    low = " " + " ".join(plains).lower() + " "
+    slen = [len(s.split()) for s in sents]
+    psent = [len(sentences(p)) for p in plains]
+    open_par = {}
+    for p in plains:
+        k = " ".join(p.split()[:2]).lower().strip(",;:")
+        open_par[k] = open_par.get(k, 0) + 1
+    open_sent = {}
+    for s in sents:
+        w = s.split()[0].lower().strip(",;:\"(") if s.split() else ""
+        open_sent[w] = open_sent.get(w, 0) + 1
+
+    def count(word: str) -> int:
+        return len(re.findall(r"(?<![a-z])" + re.escape(word) + r"(?![a-z])", low))
+    ize = len(re.findall(r"[a-z]{3,}iz(?:e|es|ed|ing|ation|ations)\b", low))
+    ise = len(re.findall(r"[a-z]{3,}is(?:e|es|ed|ing|ation|ations)\b", low)) - sum(
+        count(w) for w in ("otherwise", "precise", "precisely", "concise", "exercise", "exercises", "wise", "promise",
+                           "promises", "advise", "devise", "expertise", "comprise", "comprises", "surprise",
+                           "surprising", "raise", "raises", "raised", "rise", "rises", "noise", "revise", "revised",
+                           "supervised", "unsupervised", "premise", "premises", "paradise", "pairwise", "likewise",
+                           "stepwise", "elementwise", "pointwise", "coordinatewise"))
+    return {
+        "words": words,
+        "paragraphs": len(plains),
+        "sentences": len(sents),
+        "sentence_words": {"mean": round(sum(slen) / max(len(slen), 1), 1), "median": pct(slen, 0.5),
+                           "p90": pct(slen, 0.9)},
+        "paragraph_sentences": {"mean": round(sum(psent) / max(len(psent), 1), 1), "median": pct(psent, 0.5)},
+        "paragraph_openings": sorted(open_par.items(), key=lambda kv: -kv[1])[:12],
+        "sentence_openings": sorted(open_sent.items(), key=lambda kv: -kv[1])[:15],
+        "hedges_per_1k": {h: per_k(count(h), words) for h in HEDGES if count(h)},
+        "connectives_per_1k": {c: per_k(count(c), words) for c in CONNECTIVES if count(c)},
+        "person_per_1k": {"we/our/us": per_k(count("we") + count("our") + count("us"), words),
+                          "I/my": per_k(len(re.findall(r"(?<![A-Za-z])(?:I|my)(?![A-Za-z])", " ".join(plains))), words),
+                          "this paper/work": per_k(count("this paper") + count("this work"), words)},
+        "passive_per_1k": per_k(len(re.findall(r"\b(?:is|are|was|were|be|been|being)\s+[a-z]+ed\b", low)), words),
+        "contractions_per_1k": per_k(len(re.findall(r"[a-z](?:n't|'re|'ll|'ve|'d)\b", low)), words),
+        "spelling": {"-ize": ize, "-ise": max(ise, 0), "modeling": count("modeling"), "modelling": count("modelling"),
+                     "behavior": count("behavior") + count("behaviors"), "behaviour": count("behaviour") + count("behaviours")},
+        "punctuation_per_1k": {"semicolon": per_k(low.count(";"), words), "colon": per_k(low.count(":"), words),
+                               "em dash": per_k(raw.count("---"), words), "parenthesis": per_k(low.count("("), words),
+                               "footnote": per_k(raw.count("\\footnote"), words)},
+        "latex": {k: len(re.findall(pat, raw)) for k, pat in (
+            ("\\citet", r"\\citet\b"), ("\\citep", r"\\citep\b"), ("\\cite", r"\\cite\b"), ("\\cref", r"\\[cC]ref\b"),
+            ("\\ref", r"\\ref\b"), ("\\eqref", r"\\eqref\b"), ("Figure~", r"Figure~"), ("Fig.~", r"Fig\.~"),
+            ("Section~", r"Section~"), ("Sec.~", r"Sec\.~"), ("e.g.,", r"e\.g\.,"), ("e.g. (no comma)", r"e\.g\.(?!,)"),
+            ("i.e.,", r"i\.e\.,"), ("\\emph", r"\\emph\b"), ("\\textbf", r"\\textbf\b"),
+            ("itemize/enumerate", r"\\begin\{(?:itemize|enumerate)\}"),
+            ("theorem-like", r"\\begin\{(?:theorem|lemma|proposition|corollary|definition|assumption|remark)\*?\}"))},
+    }
+
+
+def tex_work(path: Path, max_paras: int) -> dict:
+    if path.is_dir():
+        main = find_main_tex(path)
+        if not main:
+            raise OwError(f"no .tex file with \\documentclass in {path}")
+        root = path
+    else:
+        main, root = path, path.parent
+    raw = expand_tex(main, root)
+    m = TITLE_RE.search(raw)
+    title = detex(m.group(1)) if m else main.stem
+    body = raw.split("\\begin{document}", 1)[-1].split("\\end{document}", 1)[0]
+    body = re.split(r"\\(?:bibliography|printbibliography|begin\{thebibliography\})", body, maxsplit=1)[0]
+    am = ABSTRACT_RE.search(raw)
+    abstract = prose_paragraphs(am.group(1), []) if am else []
+    if am:
+        body = body.replace(am.group(0), "")
+    chunks, last, name = [], 0, "(before the first section)"
+    for sm in SEED_SECTION_RE.finditer(body):
+        chunks.append((name, body[last:sm.start()]))
+        name, last = detex(sm.group(2)) or sm.group(2), sm.end()
+    chunks.append((name, body[last:]))
+    sections = []
+    for name, chunk in chunks:
+        paras = [p for p in prose_paragraphs(chunk, []) if is_prose(p)]
+        if paras:
+            sections.append({"title": name, "paragraphs": paras})
+    allp = [p for p in abstract if is_prose(p)] + [p for s in sections for p in s["paragraphs"]]
+    if not allp:
+        raise OwError(f"found no prose paragraphs in {path}")
+    samples = [("Abstract", p) for p in abstract[:2]]
+    for i, s in enumerate(sections):
+        take = 2 if i == 0 or re.search(r"intro|conclu|discuss", s["title"], re.I) else 1
+        samples += [(s["title"], p) for p in s["paragraphs"][:take]]
+        if re.search(r"conclu|discuss", s["title"], re.I) and len(s["paragraphs"]) > take:
+            samples.append((s["title"], s["paragraphs"][-1]))
+    samples = samples[:max_paras]
+    macros = re.findall(r"\\(?:newcommand|renewcommand|providecommand|DeclareMathOperator)\*?\s*\{?\\([A-Za-z@]+)", raw)
+    return {"kind": "tex", "main": str(main), "title": title, "sections": [s["title"] for s in sections],
+            "mtime": max(f.stat().st_mtime for f in ([main] + list(root.rglob("*.tex")) if path.is_dir() else [main])),
+            "para_hashes": [sha1(p) for p in allp],
+            "stats": {**prose_stats(allp, body), "macros_defined": sorted(set(macros))[:60]},
+            "samples": samples, "sha256": hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()}
+
+
+def pdf_text(path: Path) -> str:
+    if shutil.which("pdftotext"):
+        r = subprocess.run(["pdftotext", "-layout", str(path), "-"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout
+    if sys.platform == "darwin" and shutil.which("swift"):
+        with tempfile.TemporaryDirectory(prefix="pairtex-pdf-") as tmp:
+            script = Path(tmp) / "pdftext.swift"
+            script.write_text(PDF_SWIFT, encoding="utf-8")
+            r = subprocess.run(["swift", str(script), str(path)], capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout
+    raise OwError(f"cannot read text from {path.name}: install pdftotext (poppler: brew install poppler, or apt install "
+                  f"poppler-utils), or seed from the paper's .tex source instead")
+
+
+def pdf_work(path: Path, max_paras: int) -> dict:
+    text = pdf_text(path).replace("\r", "")
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    text = re.split(r"\n\s*(?:References|REFERENCES|Bibliography|BIBLIOGRAPHY)\s*\n", text, maxsplit=1)[0]
+    m = re.search(r"^\s*(?:Abstract|ABSTRACT)\b[.:]?", text[:6000], re.M)  # the title block names people: skip it
+    head, text = (text[:m.start()], text[m.end():]) if m else ("", text)
+    lines = [ln.strip() for ln in text.split("\n")]
+    paras, cur = [], []
+    for ln in lines:
+        if not ln or re.fullmatch(r"\d{1,3}", ln):
+            if cur:
+                paras.append(" ".join(cur))
+                cur = []
+            continue
+        cur.append(ln)
+        if ln.endswith((".", "?", "!")) and len(ln) < 60 and len(" ".join(cur).split()) > 40:
+            paras.append(" ".join(cur))
+            cur = []
+    if cur:
+        paras.append(" ".join(cur))
+    paras = [re.sub(r"\s+", " ", p) for p in paras if is_prose(p)]
+    if not paras:
+        raise OwError(f"found no prose in {path.name} (a scanned PDF?); seed from the .tex source instead")
+    title = next((ln.strip() for ln in head.split("\n") if len(ln.split()) >= 3), path.stem)[:160]
+    step = max(1, len(paras) // max(1, max_paras))
+    samples = [("(PDF text)", p) for p in paras[::step][:max_paras]]
+    return {"kind": "pdf", "main": str(path), "title": title, "sections": [], "mtime": path.stat().st_mtime,
+            "para_hashes": [sha1(p) for p in paras],
+            "stats": prose_stats(paras, ""), "samples": samples, "rough": True,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def top_main_tex(folder: Path) -> Path | None:
+    cands = [p for p in folder.glob("*.tex")
+             if "\\documentclass" in p.read_text(encoding="utf-8", errors="replace")[:20000]]
+    return sorted(cands, key=lambda p: (p.name not in ("main.tex", "paper.tex", "ms.tex"), -p.stat().st_size))[0] \
+        if cands else None
+
+
+def seed_inputs(paths: list[str]) -> list[Path]:
+    """Each argument is one work (a .tex file, a .pdf, a LaTeX project folder) or a folder of works: its own main file,
+    each subfolder that holds a LaTeX project, and its PDFs."""
+    out = []
+    for a in paths:
+        p = Path(a).expanduser().resolve()
+        if not p.exists():
+            raise OwError(f"no such file or folder: {a}")
+        if p.is_file():
+            if p.suffix.lower() not in (".tex", ".pdf"):
+                raise OwError(f"{p.name}: seed takes .tex files, .pdf files or LaTeX project folders")
+            out.append(p)
+            continue
+        top = top_main_tex(p)
+        subs = [d for d in sorted(p.iterdir()) if d.is_dir() and not d.name.startswith(".") and find_main_tex(d)]
+        pdfs = sorted(p.glob("*.pdf")) if not top else []
+        if top and not subs:
+            out.append(p)
+        elif top or subs or pdfs:
+            out += ([top] if top else []) + subs + pdfs
+        else:
+            raise OwError(f"{p}: no LaTeX project (a .tex file with \\documentclass) or PDF in it")
+    return out
+
+
+def dedupe_works(works: list[dict], min_words: int) -> tuple[list[dict], list[str]]:
+    """Drafts and versions of one paper are one piece of evidence, not several: keep the newest of works whose titles
+    start alike or whose paragraphs mostly coincide. Works under `min_words` words are too short to show a style."""
+    skipped = [f"{w['path']}: {w['stats']['words']} words, under --min-words {min_words}"
+               for w in works if w["stats"]["words"] < min_words]
+    works = [w for w in works if w["stats"]["words"] >= min_words]
+    works.sort(key=lambda w: -w["mtime"])
+    kept: list[dict] = []
+    def same_title(a: str, b: str) -> bool:  # one title starts with the other, three words or more
+        ta, tb = re.findall(r"[a-z0-9]+", a.lower())[:8], re.findall(r"[a-z0-9]+", b.lower())[:8]
+        n = min(len(ta), len(tb))
+        return n >= 3 and ta[:n] == tb[:n]
+    for w in works:
+        paras = set(w["para_hashes"])
+        dup = None
+        for k in kept:
+            shared = len(paras & set(k["para_hashes"]))
+            if same_title(w["title"], k["title"]) or shared >= max(3, 0.3 * min(len(paras), len(k["para_hashes"]) or 1)):
+                dup = k
+                break
+        if dup:
+            skipped.append(f"{w['path']}: an older version of \"{dup['title'][:60]}\" ({dup['path']})")
+        else:
+            kept.append(w)
+    return kept, skipped
+
+
+def habit_signals(works: list[dict]) -> list[dict]:
+    """Habits to check across works: how many of the works show each one."""
+    def have(pred):
+        hits = [w["title"][:60] for w in works if pred(w["stats"])]
+        return {"works": len(hits), "of": len(works), "which": hits}
+    tests = {
+        "first person plural (we/our) at 10 or more per 1000 words": lambda s: s["person_per_1k"]["we/our/us"] >= 10,
+        "American -ize spelling": lambda s: s["spelling"]["-ize"] > max(2, 2 * s["spelling"]["-ise"]),
+        "British -ise spelling": lambda s: s["spelling"]["-ise"] > max(2, 2 * s["spelling"]["-ize"]),
+        "median sentence 22 words or more": lambda s: s["sentence_words"]["median"] >= 22,
+        "median sentence 17 words or fewer": lambda s: 0 < s["sentence_words"]["median"] <= 17,
+        "em dashes, 2 or more per 1000 words": lambda s: s["punctuation_per_1k"]["em dash"] >= 2,
+        "semicolons, 3 or more per 1000 words": lambda s: s["punctuation_per_1k"]["semicolon"] >= 3,
+        "almost no semicolons (under 0.5 per 1000 words)": lambda s: s["punctuation_per_1k"]["semicolon"] < 0.5,
+        "no contractions": lambda s: s["contractions_per_1k"] == 0,
+        "\\citet more often than \\citep": lambda s: s.get("latex", {}).get("\\citet", 0) > s.get("latex", {}).get("\\citep", 0) > 0,
+        "\\cref instead of \\ref": lambda s: s.get("latex", {}).get("\\cref", 0) > s.get("latex", {}).get("\\ref", 0),
+        "'e.g.,' with a comma": lambda s: s.get("latex", {}).get("e.g.,", 0) > s.get("latex", {}).get("e.g. (no comma)", 0),
+        "'Figure~' spelled out": lambda s: s.get("latex", {}).get("Figure~", 0) > s.get("latex", {}).get("Fig.~", 0),
+        "short paragraphs (median 4 sentences or fewer)": lambda s: 0 < s["paragraph_sentences"]["median"] <= 4,
+    }
+    out = []
+    for habit, pred in tests.items():
+        h = have(pred)
+        if h["works"]:
+            out.append({"habit": habit, **h})
+    return sorted(out, key=lambda x: -x["works"])
+
+
+def write_events(events: list[dict], project: str | None) -> list[str]:
+    STYLE_DIR.mkdir(parents=True, exist_ok=True)
+    ids = []
+    with open(STYLE_DIR / ".evidence.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        n = 0
+        if EVIDENCE.exists():
+            with open(EVIDENCE, encoding="utf-8") as f:
+                n = sum(1 for line in f if line.strip())
+        with open(EVIDENCE, "a", encoding="utf-8") as f:
+            for e in events:
+                n += 1
+                e = {"id": f"E{n:04d}", "date": now_iso(), "project": project, **e}
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+                ids.append(e["id"])
+    return ids
+
+
+def all_events() -> list[dict]:
+    if not EVIDENCE.exists():
+        return []
+    with open(EVIDENCE, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def cmd_seed(args) -> int:
+    if args.list:
+        seeds = sorted(d for d in SEED_DIR.iterdir() if (d / "manifest.json").exists()) if SEED_DIR.exists() else []
+        if not seeds:
+            print("no seeds yet: pairtex seed <your papers: .tex files, LaTeX project folders or PDFs>")
+            return 0
+        evs = all_events()
+        for d in seeds:
+            man = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+            mine = [e for e in evs if e.get("kind") == "seed" and e.get("seed") == d.name]
+            open_ = [e["id"] for e in mine if not e.get("acked") and not e.get("discarded")]
+            print(f"{d.name}  {man['date'][:10]}  {len(man['works'])} work(s), {sum(w['words'] for w in man['works'])} words"
+                  f"  {'learned' if not open_ else 'waiting: ' + ' '.join(open_)}" + (f"  ({man['note']})" if man.get("note") else ""))
+        return 0
+    if args.forget:
+        d = SEED_DIR / args.forget
+        if not (d / "manifest.json").exists():
+            raise OwError(f"no seed '{args.forget}' (pairtex seed --list)")
+        ids = {e["id"] for e in all_events() if e.get("kind") == "seed" and e.get("seed") == args.forget}
+        n = mark_events(ids, "discarded", {"why": "seed forgotten", "date": now_iso()}) if ids else 0
+        shutil.rmtree(d)
+        print(f"forgot {args.forget}: removed its samples and discarded its {n} event(s). Entries in {STYLE_MD} that cite "
+              f"only these events should be removed by hand.")
+        return 0
+    if not args.paths:
+        raise OwError("give your papers: pairtex seed paper1/ paper2.tex paper3.pdf (or --list, --forget ID)")
+    works, skipped = [], []
+    for p in seed_inputs(args.paths):
+        try:
+            w = pdf_work(p, args.max_paras) if p.suffix.lower() == ".pdf" else tex_work(p, args.max_paras)
+            w["path"] = str(p)
+            works.append(w)
+        except OwError as exc:
+            skipped.append(f"{p}: {exc}")
+    works, dropped = dedupe_works(works, args.min_words)
+    skipped += dropped
+    if not works:
+        raise OwError("nothing to seed:\n  " + "\n  ".join(skipped))
+    SEED_DIR.mkdir(parents=True, exist_ok=True)
+    n = 1 + max([int(d.name.split("-")[1]) for d in SEED_DIR.glob("seed-*") if d.name.split("-")[1].isdigit()] or [0])
+    seed_id = f"seed-{n:03d}"
+    out = SEED_DIR / seed_id
+    out.mkdir()
+    manifest = {"seed": seed_id, "date": now_iso(), "note": args.note or "", "tool": f"pairtex {VERSION}",
+                "works": [{"path": w["path"], "main": w["main"], "kind": w["kind"], "title": w["title"],
+                           "sha256": w["sha256"], "words": w["stats"]["words"], "paragraphs": w["stats"]["paragraphs"],
+                           "rough": w.get("rough", False)} for w in works]}
+    stats = {"works": [{"title": w["title"], "kind": w["kind"], "sections": w["sections"], **w["stats"]} for w in works],
+             "habits": habit_signals(works)}
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    (out / "stats.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    md = [f"# {seed_id}: samples of the author's own writing", "",
+          f"{len(works)} work(s), seeded {manifest['date'][:10]}" + (f": {args.note}" if args.note else "") + ".",
+          "Read these with stats.json and turn what recurs into STYLE.md entries (the skill's references/seeding.md).", ""]
+    for i, w in enumerate(works, 1):
+        s = w["stats"]
+        md += [f"## {i}. {w['title']}", "",
+               f"`{w['path']}` · {w['kind']}{' (text from the PDF, rough)' if w.get('rough') else ''} · "
+               f"{s['words']} words · {s['paragraphs']} paragraphs · median sentence {s['sentence_words']['median']:.0f} words",
+               ""]
+        if w["sections"]:
+            md += ["Sections: " + " · ".join(w["sections"][:20]), ""]
+        last = None
+        for sec, para in w["samples"]:
+            if sec != last:
+                md += [f"### {sec}", ""]
+                last = sec
+            md += [clip(para, 1500), ""]
+    (out / "samples.md").write_text("\n".join(md), encoding="utf-8")
+    ids = write_events([{"kind": "seed", "seed": seed_id, "file": w["path"], "title": w["title"], "source": w["kind"],
+                         "words": w["stats"]["words"], "paragraphs": w["stats"]["paragraphs"]} for w in works], None)
+    print(f"{seed_id}: {len(works)} work(s), {sum(w['stats']['words'] for w in works)} words of your prose, in {out}")
+    for w, i in zip(works, ids):
+        print(f"  {i}  {w['title'][:70]}  ({w['kind']}, {w['stats']['words']} words)")
+    for h in stats["habits"][:6]:
+        print(f"  habit in {h['works']} of {h['of']}: {h['habit']}")
+    for s in skipped:
+        print(f"  skipped {s}")
+    print(f"next: your agent reads {out / 'samples.md'} and {out / 'stats.json'}, drafts entries in {STYLE_MD} "
+          f"(references/seeding.md), then runs: pairtex learn --ack {' '.join(ids)}")
+    return 0
+
+
+def cmd_show(args) -> int:
+    p = Project(args.slug)
+    st = load_state(p)
+    want = {p.prefix + x if x.isdigit() else x for x in (args.cids or [])}
+    rows = [c for cid, c in sorted(st["comments"].items(), key=lambda kv: id_num(kv[0])) if not want or cid in want]
+    if not args.all and not want:
+        rows = [c for c in rows if c["status"] in ("sent", "resolved", "pushed")]
+    if not rows:
+        print("no comments" + ("" if args.all else " in progress (use --all for the history)"))
+        return 0
+    for c in rows:
+        tag = " question" if c.get("kind") == "question" else ""
+        print(f"{c['id']} [{c['status']}{tag}] {c['file']}:{c['line']} · {c.get('section', '')}")
+        for r in c.get("ranges", []):
+            print(f"  About: \"{short_quote(r['text'])}\"")
+        who = c.get("handle") or p.handle
+        print(f"  {who}: " + c["text"].replace("\n", "\n" + " " * (len(who) + 4)))
+        if c.get("reply"):
+            print("  Reply: " + c["reply"].replace("\n", "\n         "))
+        if c.get("outcome"):
+            print(f"  Outcome: {c['outcome']}")
+        for ch in c.get("changes", [])[:6] if args.diff else []:
+            print("  Edit: " + clip(word_diff(ch["before"], ch["claude"]), 600))
+    return 0
+
+
+def cmd_status(args) -> int:
+    p = Project(args.slug)
+    st = load_state(p)
+    owner = lock_owner(p)
+    try:
+        remote = remote_head(p) if not (owner and p.backend == "folder") else \
+            git(p.dir, f"--git-dir={p.dir / 'folder.git'}", "rev-parse", f"refs/heads/{p.branch}").strip()
+        remote_s = short(remote) + (" (checkout is current)" if remote == head(p.repo) else " (newer than the checkout)")
+    except GitError as exc:
+        remote_s = f"unreachable: {exc}"
+    counts: dict[str, int] = {}
+    for c in st["comments"].values():
+        counts[c["status"]] = counts.get(c["status"], 0) + 1
+    print(f"{p.slug}: {p.cfg.get('title', '')}")
+    print(f"  {p.label[0].upper() + p.label[1:]} ({p.backend}): {p.where()} · head {remote_s}")
+    print(f"  checkout: {p.repo} at {short(head(p.repo))}" + (f" · {len(dirty(p.repo))} uncommitted change(s)" if dirty(p.repo) else ""))
+    print(f"  watcher: " + (f"running, pid {owner['pid']} since {owner['started']}" if owner else "not running"))
+    print(f"  answers: " + (f"{p.owner} ({p.handle})" if p.owner else "every comment") +
+          "".join(f", {n} ({h})" for n, h in p.comments_from.items()) + f" · ids {p.prefix}1, {p.prefix}2, …")
+    print("  comments: " + (", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "none yet"))
+    if p.terminator:
+        writing = sum(1 for c in scan(p)["opens"] if not c.get("ready"))
+        if writing:
+            print(f"  being written (no closing {p.terminator} yet): {writing}")
+    if st.get("others"):
+        by = sorted(set(st["others"].values()))
+        print(f"  left to their authors: {len(st['others'])} comment(s) by {', '.join(by)} "
+              f"(add a name to comments_from in project.json to answer them here)")
+    for w in double_answered(p):
+        print(f"  warning: {w}")
+    todo = [cid for cid, c in st["comments"].items() if c["status"] in ("sent", "resolved")]
+    if todo:
+        print(f"  to finish first: {', '.join(todo)} (`pairtex show {p.slug}`)")
+    print(f"  style evidence waiting: {len(read_events(st.get('pending_events', [])))}")
+    print(f"  style guide: {style_summary()}")
+    return 0
+
+
+# --------------------------------------------------------------------- submission check, clean copy
+
+VERBATIM = re.compile(r"\\begin\s*\{(verbatim\*?|Verbatim\*?|lstlisting|minted|comment)\}")
+
+
+def is_def_line(line: str) -> bool:
+    code = code_part(line)
+    return bool(DEF_RE.search(code) or "\\providecolor{claudecol}" in code or "\\hideclaudenotes" in code
+                or line.startswith(DEF_HEADS) or line.strip() == HIDE_LINE.strip())
+
+
+def synced_rev(p: Project) -> str:
+    """The paper's current head, fetched into the checkout without changing its files or the loop's state."""
+    try:
+        if p.backend == "folder":
+            folder_sync_in(p)
+        git(p.repo, "fetch", "--quiet", p.remote, p.branch, timeout=240)
+        return git(p.repo, "rev-parse", f"{p.remote}/{p.branch}").strip()
+    except GitError as exc:
+        print(f"(could not fetch {p.label}, so this reads the checkout: {exc})", file=sys.stderr)
+        return "HEAD"
+
+
+INPUT_RE = re.compile(r"\\(?:input|include|subfile|subfileinclude)\s*\{([^}]+)\}|\\(?:sub)?import\*?\s*\{([^}]*)\}\s*\{([^}]+)\}")
+
+
+def paper_files(p: Project, rev: str) -> list[str]:
+    """The main file and the .tex files it includes, recursively (a project often holds several drafts)."""
+    tracked = {f for f in git(p.repo, "ls-tree", "-r", "-z", "--name-only", rev).split("\0") if f.endswith(".tex")}
+    if not p.main or p.main not in tracked:
+        return sorted(tracked)
+    base = str(Path(p.main).parent)
+    seen, todo = [], [p.main]
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.append(f)
+        for m in INPUT_RE.finditer(code_only(file_at(p.repo, rev, f) or "")):
+            name = m.group(1) or (m.group(2) + m.group(3))
+            name = name.strip()
+            for cand in (name, name + ".tex", str(Path(base) / name), str(Path(base) / (name + ".tex")),
+                         str(Path(f).parent / name), str(Path(f).parent / (name + ".tex"))):
+                cand = os.path.normpath(cand)
+                if cand in tracked:
+                    todo.append(cand)
+                    break
+    return seen
+
+
+def leftovers(p: Project, rev: str, every: bool = False) -> list[tuple[str, int, str, str]]:
+    """What the loop and its comments left in the paper's .tex files at rev: (file, line, kind, text)."""
+    rows = []
+    files = sorted(f for f in git(p.repo, "ls-tree", "-r", "-z", "--name-only", rev).split("\0") if f.endswith(".tex")) \
+        if every else paper_files(p, rev)
+    for f in files:
+        verb = None
+        for i, line in enumerate((file_at(p.repo, rev, f) or "").split("\n"), 1):
+            if verb:
+                if re.search(r"\\end\s*\{" + re.escape(verb) + r"\}", line):
+                    verb = None
+                continue
+            code = code_part(line)
+            if is_def_line(line):
+                rows.append((f, i, "note definition", line.strip()))
+                continue
+            for cid in NOTE_RE.findall(code):
+                rows.append((f, i, "note", cid))
+            mk = parse_marker(line, known=[])
+            if mk:
+                rows.append((f, i, "comment" if mk["kind"] == "open" else "thread", line[mk["col"]:].strip()))
+            if BRACKETS.search(code):
+                rows.append((f, i, "brackets", code.strip()))
+            for body in macro_bodies(code, p.macros):
+                rows.append((f, i, "coauthor note", body))
+            m = VERBATIM.search(code)
+            if m:
+                verb = m.group(1)
+    return rows
+
+
+def clean_tex(text: str, keep_comments: bool = False) -> tuple[str, dict]:
+    """The text without notes, the note macro, comments and threads, and [[ ]]. Every other % comment goes too
+    (arXiv publishes the source) unless keep_comments; an inline one keeps its %, so line ends behave the same."""
+    counts = {"notes": 0, "comments": 0, "brackets": 0, "definition": 0}
+    out, verb = [], None
+    for line in text.split("\n"):
+        if verb:
+            out.append(line)
+            if re.search(r"\\end\s*\{" + re.escape(verb) + r"\}", line):
+                verb = None
+            continue
+        if is_def_line(line):
+            counts["definition"] += 1
+            continue
+        code, k = code_part(line), comment_index(line)
+        mk = parse_marker(line, known=[])
+        new = strip_notes(code)
+        counts["notes"] += len(NOTE_RE.findall(code)) if new != code else 0
+        nb = BRACKETS.sub("", new)
+        counts["brackets"] += len(BRACKETS.findall(new))
+        if k >= 0:
+            counts["comments"] += bool(mk)
+            if code.strip() == "":  # a whole-line comment
+                if not mk and keep_comments:
+                    out.append(line)
+                continue
+            tail = line[k:] if keep_comments and not mk else "%"
+        else:
+            tail = ""
+        if nb.strip() == "" and code.strip() != "":  # the line held only a note
+            continue
+        out.append(nb + tail)
+        m = VERBATIM.search(code)
+        if m:
+            verb = m.group(1)
+    return "\n".join(out), counts
+
+
+def cmd_check(args) -> int:
+    p = Project(args.slug)
+    rev = synced_rev(p)
+    rows = leftovers(p, rev, args.all)
+    scope = "every .tex file" if args.all or not p.main else f"{p.main} and the files it includes"
+    if args.json:
+        print(json.dumps([{"file": f, "line": n, "kind": k, "text": t} for f, n, k, t in rows], indent=1,
+                         ensure_ascii=False))
+        return 1 if rows else 0
+    at = short(git(p.repo, 'rev-parse', rev).strip())
+    if not rows:
+        print(f"{p.slug} at {at} ({scope}): no notes, comments, threads or brackets left.")
+        return 0
+    order = ["note", "comment", "thread", "brackets", "note definition", "coauthor note"]
+    print(f"{p.slug} at {at} ({scope}): {len(rows)} thing(s) left before submission")
+    for kind in order:
+        these = [r for r in rows if r[2] == kind]
+        if these:
+            print(f"\n{kind}s ({len(these)}):")
+            for f, n, _, t in these[:args.limit]:
+                print(f"  {f}:{n}  {clip(t, 110)}")
+            if len(these) > args.limit:
+                print(f"  … and {len(these) - args.limit} more")
+    if any(k == "note definition" and "[3]" in t for _, _, k, t in rows):
+        print("\nTo hide every note in the PDF at once (this paper has the note macro from before 0.4): add the line "
+              "\\renewcommand{\\claude}[3]{} right after the \\providecommand{\\claude} line.")
+    else:
+        print("\nTo hide every note in the PDF at once, delete the first % of the line \"% \\def\\hideclaudenotes{}\" "
+              "in the preamble.")
+    print(f"For a copy without notes, comments and brackets (for arXiv or a journal): pairtex clean {p.slug} --out DIR")
+    return 1
+
+
+def cmd_clean(args) -> int:
+    p = Project(args.slug)
+    out = Path(args.out).expanduser().resolve()
+    if out.exists() and any(out.iterdir()):
+        raise OwError(f"{out} is not empty")
+    if out == p.dir or p.dir in out.parents or (p.folder and (out == p.folder or p.folder in out.parents)):
+        raise OwError("write the clean copy outside the project and the paper's folder")
+    rev = synced_rev(p)
+    out.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(git_bytes(p.repo, "archive", rev))) as tar:
+        tar.extractall(out)
+    totals = {"notes": 0, "comments": 0, "brackets": 0, "definition": 0}
+    kept = []
+    for f in sorted(out.rglob("*.tex")):
+        text = f.read_text(encoding="utf-8", errors="surrogateescape")
+        new, counts = clean_tex(text, args.keep_comments)
+        for k, v in counts.items():
+            totals[k] += v
+        if new != text:
+            f.write_text(new, encoding="utf-8", errors="surrogateescape")
+        kept += macro_bodies(new, p.macros)
+    print(f"clean copy of {p.slug} at {short(git(p.repo, 'rev-parse', rev).strip())} in {out}: removed "
+          f"{totals['notes']} note(s), {totals['comments']} comment or thread line(s), {totals['brackets']} bracket(s)"
+          + (", the note macro" if totals["definition"] else "")
+          + ("" if args.keep_comments else ", and every other % comment") + ".")
+    if kept:
+        print(f"still there: {len(kept)} coauthor note(s) ({', '.join(sorted({b.split('{')[0] for b in kept}))}): "
+              f"remove them, or define the macro to print nothing.")
+    if args.compile:
+        if not p.main:
+            raise OwError("the project has no main file to compile")
+        build = p.build / "clean"
+        shutil.rmtree(build, ignore_errors=True)
+        code, errs, tail = run_latex(p, out, p.main, build)
+        pages = pdf_pages(build / (Path(p.main).stem + ".log"))
+        pdf = build / (Path(p.main).stem + ".pdf")
+        if pdf.exists():
+            print(f"compiles: {pdf} ({pages} pages)" + (f"; {len(errs)} LaTeX error(s)" if errs else ""))
+        else:
+            print(f"does not compile ({len(errs)} error(s)):\n" + "\n".join(f"  {f}:{n}: {m}" for f, n, m in errs[:8])
+                  + ("" if errs else "\n" + tail))
+            return EXIT_COMPILE
+    return 0
+
+
+# --------------------------------------------------------------------- profile, data home, migration
+
+HOME_GITIGNORE = """# PairTeX data home: each project's checkout and working state stay local
+projects/*/repo/
+projects/*/build/
+projects/*/state.json
+projects/*/state.tmp
+projects/*/watch.lock
+projects/*/batches/
+projects/*/conflicts/
+projects/*/folder.git/
+projects/*/folder.index
+projects/*/folder-cache.json
+projects/*/folder.lock
+vault/.evidence.lock
+vault/*.tmp
+.DS_Store
+"""
+
+
+def default_prefix(handle: str) -> str:
+    p = re.sub(r"[^a-z]", "", (handle or "").lower())[:6]
+    return p if p and p not in ("tex", "bib") else "c"
+
+
+def global_git(key: str) -> str:
+    return git(Path.home(), "config", "--global", key, check=False).strip()
+
+
+def init_home_repo(home: Path, name: str, email: str, message: str) -> None:
+    if (home / ".git").exists():
+        return
+    (home / ".gitignore").write_text(HOME_GITIGNORE, encoding="utf-8")
+    git(home, "init", "--quiet")
+    git(home, "add", "-A")
+    ident = ["-c", f"user.name={name or 'pairtex'}", "-c", f"user.email={email or 'pairtex@localhost'}"]
+    git(home, *ident, "commit", "--quiet", "-m", message, check=False)
+
+
+def from_template(template: str, dest: Path, **subs: str) -> None:
+    if dest.exists():
+        return
+    tpl = TEMPLATES / template
+    text = tpl.read_text(encoding="utf-8") if tpl.exists() else ""
+    for k, v in subs.items():
+        text = text.replace("{" + k + "}", v)
+    dest.write_text(text, encoding="utf-8")
+
+
+def cmd_setup(args) -> int:
+    env_home = home_env()
+    home = Path(env_home).expanduser() if env_home else \
+        Path(args.home).expanduser().absolute() if args.home else DEFAULT_HOME
+    if home.resolve() == APP or APP in home.resolve().parents:
+        raise OwError(f"keep the data home outside the code folder {APP}: pass --home DIR")
+    if not env_home and home != DEFAULT_HOME:
+        if DEFAULT_HOME.exists() or DEFAULT_HOME.is_symlink():
+            if DEFAULT_HOME.resolve() != home.resolve():
+                raise OwError(f"{DEFAULT_HOME} already exists and points to {DEFAULT_HOME.resolve()}")
+        else:
+            home.mkdir(parents=True, exist_ok=True)
+            DEFAULT_HOME.symlink_to(home)
+    home.mkdir(parents=True, exist_ok=True)
+    prof_path = home / "profile.json"
+    prof = json.loads(prof_path.read_text(encoding="utf-8")) if prof_path.exists() else {}
+    name = args.name or prof.get("name") or global_git("user.name")
+    if not name:
+        raise OwError("give your name as your editor shows it to coauthors (Overleaf account name): --name \"Ada Lovelace\"")
+    handle = args.handle or prof.get("handle") or first_word(name)
+    prefix = args.id_prefix or prof.get("id_prefix") or default_prefix(handle)
+    if not re.fullmatch(r"[a-z]{1,8}", prefix) or prefix in ("tex", "bib"):
+        raise OwError("--id-prefix: one to eight lowercase letters (not tex or bib)")
+    prof.update(name=name, handle=handle, id_prefix=prefix)
+    prof["email"] = args.email or prof.get("email") or global_git("user.email")
+    if args.agent:
+        prof["agent"] = args.agent
+    prof.setdefault("agent", "Claude")
+    prof.setdefault("notes", "visible")
+    prof.setdefault("terminator", "..")
+    prof_path.write_text(json.dumps(prof, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    vault = (Path(prof["vault"]).expanduser() if prof.get("vault") else home / "vault")
+    vault = vault if vault.is_absolute() else home / vault
+    vault.mkdir(parents=True, exist_ok=True)
+    (home / "projects").mkdir(exist_ok=True)
+    from_template("STYLE.template.md", vault / "STYLE.md", name=name, handle=handle)
+    from_template("preferences.template.md", vault / "preferences.md", name=name, handle=handle)
+    (vault / "evidence.jsonl").touch()
+    if not args.no_git:
+        init_home_repo(home, name, prof["email"], "PairTeX data home")
+    print(f"profile: {prof_path}\n  {name} (notes say \"{handle}:\"), comment ids {prefix}1, {prefix}2, …, "
+          f"agent {prof['agent']}\nstyle vault: {vault}\nprojects: {home / 'projects'}\n"
+          f"Next: pairtex init <slug> --overleaf <project id> --main <main.tex>  (or --git URL, or --folder DIR)")
+    return 0
+
+
+def cmd_paths(args) -> int:
+    legacy = DATA == APP
+    prefs = STYLE_DIR / "preferences.md"
+    if not prefs.exists() and (APP / "skill" / "references" / "preferences.md").exists():
+        prefs = APP / "skill" / "references" / "preferences.md"
+    rows = [("code", f"{APP} (pairtex {VERSION})"),
+            ("data home", f"{DATA}" + (" (next to the code, the layout before 0.4: `pairtex migrate` moves it out)"
+                                       if legacy else "")),
+            ("profile", f"{PROFILE_PATH}" + ("" if PROFILE_PATH.exists() else " (none yet: `pairtex setup`)")),
+            ("style guide", str(STYLE_MD)), ("evidence", str(EVIDENCE)), ("loop preferences", str(prefs)),
+            ("projects", f"{PROJECTS}" + (": " + ", ".join(sorted(d.name for d in PROJECTS.iterdir()
+                                                                   if (d / "project.json").exists()))
+                                          if PROJECTS.exists() else ""))]
+    if args.json:
+        print(json.dumps(dict(rows), indent=1))
+    else:
+        for k, v in rows:
+            print(f"{k:>16}  {v}")
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    src = Path(args.source).expanduser().resolve() if args.source else APP
+    env_home = home_env()
+    dst = Path(args.to).expanduser().absolute() if args.to else Path(env_home).expanduser() if env_home else DEFAULT_HOME
+    if dst.resolve() == src or src in dst.resolve().parents:
+        raise OwError(f"migrate to a folder outside {src}")
+    sp, ss = src / "projects", src / "style"
+    projects = sorted(d for d in sp.iterdir() if (d / "project.json").exists()) if sp.exists() else []
+    if not projects and not (ss / "STYLE.md").exists():
+        raise OwError(f"nothing to migrate in {src}")
+    busy, mid = [], []
+    for d in projects:
+        info = d / "watch.lock"
+        if info.exists():
+            try:
+                if pid_alive(int(json.loads(info.read_text()).get("pid", 0))):
+                    busy.append(d.name)
+            except (OSError, ValueError):
+                pass
+        st_path = d / "state.json"
+        if st_path.exists():
+            st = json.loads(st_path.read_text(encoding="utf-8"))
+            if any(c.get("status") in ("sent", "resolved") for c in st.get("comments", {}).values()):
+                mid.append(d.name)
+    if busy:
+        raise OwError(f"stop the watchers first: {', '.join(busy)}", EXIT_LOCKED)
+    if mid and not args.force:
+        raise OwError(f"comments are being answered in {', '.join(mid)} (sent or resolved, not yet published): "
+                      f"finish them first, or pass --force", EXIT_BUSY)
+    if (dst / "projects").exists() and any((dst / "projects").iterdir()):
+        raise OwError(f"{dst / 'projects'} already holds projects")
+    if (dst / "vault" / "STYLE.md").exists():
+        raise OwError(f"{dst / 'vault'} already holds a style guide")
+    plan = [f"style guide and evidence: {ss} -> {dst / 'vault'}"] if ss.exists() else []
+    plan += [f"project {d.name}: {d} -> {dst / 'projects' / d.name}" for d in projects]
+    if args.dry_run:
+        print("would move:\n  " + "\n  ".join(plan))
+        return 0
+    (dst / "vault").mkdir(parents=True, exist_ok=True)
+    (dst / "projects").mkdir(exist_ok=True)
+    if ss.exists():
+        for f in ss.iterdir():
+            if not f.name.startswith("."):
+                shutil.move(str(f), str(dst / "vault" / f.name))
+        shutil.rmtree(ss, ignore_errors=True)
+    prefs = src / "skill" / "references" / "preferences.md"
+    if prefs.exists() and not (dst / "vault" / "preferences.md").exists():
+        shutil.copy2(prefs, dst / "vault" / "preferences.md")
+    owners: dict[str, int] = {}
+    for d in projects:
+        target = dst / "projects" / d.name
+        shutil.move(str(d), str(target))
+        cfg = json.loads((target / "project.json").read_text(encoding="utf-8"))
+        if cfg.get("owner_name"):
+            owners[cfg["owner_name"]] = owners.get(cfg["owner_name"], 0) + 1
+        if cfg.get("backend") == "folder" and (target / "repo").exists():
+            git(target / "repo", "remote", "set-url", cfg.get("remote_name", "folder"), str(target / "folder.git"))
+    if sp.exists() and not any(sp.iterdir()):
+        sp.rmdir()
+    prof_path = dst / "profile.json"
+    if not prof_path.exists():
+        name = max(owners, key=owners.get) if owners else global_git("user.name")
+        prof = {"name": name, "handle": first_word(name) or "Author", "id_prefix": "c",
+                "email": global_git("user.email"), "agent": "Claude", "notes": "visible", "terminator": ".."}
+        prof_path.write_text(json.dumps(prof, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not env_home and args.to and dst.resolve() != DEFAULT_HOME and not DEFAULT_HOME.exists() \
+            and not DEFAULT_HOME.is_symlink():
+        DEFAULT_HOME.symlink_to(dst.resolve())  # so every later `ow` finds the data
+    if not args.no_git:
+        prof = json.loads(prof_path.read_text(encoding="utf-8"))
+        init_home_repo(dst, prof.get("name", ""), prof.get("email", ""), f"PairTeX data, moved from {src}")
+    print("moved:\n  " + "\n  ".join(plan) + f"\nprofile: {prof_path}")
+    print(f"Next: restart the watchers (`pairtex watch <slug>`); in {src}, commit the removal of style/ and projects/.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="pairtex", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"pairtex {VERSION}")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", help="create your profile and data home (name, note handle, comment-id prefix)")
+    s.add_argument("--name", help="your name as Overleaf (or your git commits) shows it")
+    s.add_argument("--handle", help="the short name notes print, e.g. Ada (default: your first name)")
+    s.add_argument("--email")
+    s.add_argument("--id-prefix", help="letters before comment numbers (default: from the handle, e.g. ada7)")
+    s.add_argument("--agent", help="the agent's name in notes (default Claude)")
+    s.add_argument("--home", help="data home (default ~/.pairtex; another folder gets a symlink there)")
+    s.add_argument("--no-git", action="store_true", help="do not make the data home a git repository")
+    s.set_defaults(fn=cmd_setup)
+
+    s = sub.add_parser("paths", help="where the code, profile, style vault and projects are")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_paths)
+
+    s = sub.add_parser("migrate", help="move the style vault and projects out of the code folder (0.3 layout)")
+    s.add_argument("--to", help="the data home (default ~/.pairtex, or $PAIRTEX_HOME)")
+    s.add_argument("--from", dest="source", help="the old folder (default: the code folder)")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--force", action="store_true", help="move even while comments are half answered")
+    s.add_argument("--no-git", action="store_true")
+    s.set_defaults(fn=cmd_migrate)
+
+    s = sub.add_parser("init", help="register a paper: an Overleaf project, a git remote or a local folder")
+    s.add_argument("slug")
+    s.add_argument("--overleaf", help="Overleaf project id or URL")
+    s.add_argument("--git", help="any git remote URL (GitHub, GitLab, ...)")
+    s.add_argument("--folder", help="a local folder your editor saves the paper into")
+    s.add_argument("--remote", help=argparse.SUPPRESS)  # a stand-in for Overleaf (tests)
+    s.add_argument("--main", help="main .tex file, relative to the project root")
+    s.add_argument("--title")
+    s.add_argument("--watch", nargs="*", help="globs of watched files (default *.tex)")
+    s.add_argument("--protect", nargs="*", help="coauthors' note macros never to remove, e.g. ada grace")
+    s.add_argument("--base-style", nargs="*", help="style files that rank above the vault's STYLE.md")
+    s.add_argument("--compiler", choices=sorted(ENGINES), help="default: from the main file or latexmkrc, else pdflatex")
+    s.add_argument("--id-prefix", help="comment-id letters for this paper (default: your profile's)")
+    s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("watch", help="wait for the next settled comment batch, print it, exit")
+    s.add_argument("slug")
+    s.add_argument("--interval", type=float, help="seconds between remote checks (default from project.json)")
+    s.add_argument("--settle", type=float, help="seconds a comment must stay unchanged before it is sent")
+    s.add_argument("--once", action="store_true", help="check once; exit 1 if nothing is ready")
+    s.add_argument("--takeover", action="store_true", help="stop another watcher of this project and watch here")
+    s.add_argument("--learn-every", type=int, default=0, help="also wake when this many style events wait (0: never)")
+    s.add_argument("--max-failures", type=int, default=12)
+    s.add_argument("--max-hours", type=float, default=0)
+    s.set_defaults(fn=cmd_watch)
+
+    s = sub.add_parser("resolve", help="mark a comment handled and write the reply under it")
+    s.add_argument("slug")
+    s.add_argument("cid")
+    s.add_argument("reply", nargs="?")
+    s.add_argument("--reply-file")
+    s.add_argument("--allow-edit", action="store_true", help="a question whose answer the author asked to apply")
+    s.add_argument("--plain", action="store_true", help="keep the thread in %% lines even where a note could go")
+    s.set_defaults(fn=cmd_resolve)
+
+    s = sub.add_parser("push", help="compile-check, commit and publish the checkout to the paper")
+    s.add_argument("slug")
+    s.add_argument("-m", "--message")
+    s.add_argument("--no-compile", action="store_true")
+    s.add_argument("--add-new", action="store_true")
+    s.add_argument("--allow-note-removal", action="store_true")
+    s.add_argument("--allow-thread-removal", action="store_true")
+    s.add_argument("--trailer", help="commit trailer line (default: %s)" % TRAILER)
+    s.set_defaults(fn=cmd_push)
+
+    s = sub.add_parser("learn", help="show writing-style evidence waiting to be learned, or acknowledge it")
+    s.add_argument("slug", nargs="?", help="a paper; without it, the evidence from seeds")
+    s.add_argument("--all", action="store_true", help="without a slug: also count what each paper has waiting")
+    s.add_argument("--ack", nargs="*")
+    s.add_argument("--discard", nargs="*", help="evidence that is not the author's writing: flag it and drop it")
+    s.add_argument("--why", default="", help="with --discard: the reason, kept in the event")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(fn=cmd_learn)
+
+    s = sub.add_parser("seed", help="start or extend your style guide from papers you wrote: .tex, project folders or PDFs")
+    s.add_argument("paths", nargs="*", help="one work per argument: a .tex file, a LaTeX project folder, a PDF, or a "
+                   "folder of them")
+    s.add_argument("--note", default="", help="a word on what these are (kept in the manifest)")
+    s.add_argument("--max-paras", type=int, default=24, help="sample paragraphs kept per work (default 24)")
+    s.add_argument("--min-words", type=int, default=1500, help="skip works shorter than this (default 1500)")
+    s.add_argument("--list", action="store_true", help="list past seeds")
+    s.add_argument("--forget", metavar="SEED_ID", help="remove a seed's samples and discard its events")
+    s.set_defaults(fn=cmd_seed)
+
+    s = sub.add_parser("show", help="list comments in progress (or --all)")
+    s.add_argument("slug")
+    s.add_argument("cids", nargs="*")
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--diff", action="store_true")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("status", help="project, remote, watcher and comment summary")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("check", help="before submission: list notes, comments, threads and brackets left in the paper")
+    s.add_argument("slug")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--limit", type=int, default=20, help="rows shown per kind")
+    s.add_argument("--all", action="store_true", help="every .tex file, not only the main file and what it includes")
+    s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("clean", help="write a copy without notes, comments and brackets (for arXiv or a journal)")
+    s.add_argument("slug")
+    s.add_argument("--out", required=True, help="an empty folder outside the project")
+    s.add_argument("--keep-comments", action="store_true", help="keep ordinary %% comments")
+    s.add_argument("--compile", action="store_true", help="compile the copy to check it")
+    s.set_defaults(fn=cmd_clean)
+
+    args = ap.parse_args(argv)
+    try:
+        return args.fn(args)
+    except OwError as exc:
+        print(f"pairtex: {exc}")
+        return exc.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

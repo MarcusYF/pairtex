@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 368" width="960" height="368" role="img" aria-label="How the talk-style guide learns: your rewrites of the agent's script, your undos, what you say always about, your own notes and your past talks become evidence, distilled into STYLE.md with a Pacing and script table; coauthors' comments are fixed but never learned">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#232323} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6B6B6B"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#C6952C"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6D5398"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#27709C"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#227828"/></marker></defs>
+<text x="10" y="18" font-size="15.5" style="fill:#6B6B6B">Where the evidence comes from</text>
+<rect x="10" y="30" width="340" height="42" rx="6" fill="#EAF2F8" stroke="#27709C" stroke-width="1.6"/>
+<text x="24" y="57" font-size="16"><tspan class="b">You rewrite</tspan> the agent’s script</text>
+<text x="338" y="57" font-size="14.5" class="i" text-anchor="end" style="fill:#27709C">strongest</text>
+<path d="M352,51 C380,51 380,151 404,151" stroke="#9A9A9A" stroke-width="1.6" fill="none"/>
+<rect x="10" y="80" width="340" height="42" rx="6" fill="#EAF2F8" stroke="#27709C" stroke-width="1.6"/>
+<text x="24" y="107" font-size="16"><tspan class="b">You undo</tspan> a change</text>
+<text x="338" y="107" font-size="14.5" class="i" text-anchor="end" style="fill:#27709C">never again</text>
+<path d="M352,101 C380,101 380,151 404,151" stroke="#9A9A9A" stroke-width="1.6" fill="none"/>
+<rect x="10" y="130" width="340" height="42" rx="6" fill="#EAF2F8" stroke="#27709C" stroke-width="1.6"/>
+<text x="24" y="157" font-size="16"><tspan class="b">You say</tspan> “always …”</text>
+<text x="338" y="157" font-size="14.5" class="i" text-anchor="end" style="fill:#27709C">a rule at once</text>
+<path d="M352,151 C380,151 380,151 404,151" stroke="#9A9A9A" stroke-width="1.6" fill="none"/>
+<rect x="10" y="180" width="340" height="42" rx="6" fill="#EAF2F8" stroke="#27709C" stroke-width="1.6"/>
+<text x="24" y="207" font-size="16"><tspan class="b">You edit</tspan> your own notes</text>
+<text x="338" y="207" font-size="14.5" class="i" text-anchor="end" style="fill:#27709C">your habits</text>
+<path d="M352,201 C380,201 380,151 404,151" stroke="#9A9A9A" stroke-width="1.6" fill="none"/>
+<rect x="10" y="230" width="340" height="42" rx="6" fill="#FBF6E9" stroke="#C6952C" stroke-width="1.6"/>
+<text x="24" y="257" font-size="16"><tspan class="b">Your past talks</tspan> </text>
+<text x="338" y="257" font-size="14.5" class="i" text-anchor="end" style="fill:#8A6410">seed</text>
+<path d="M352,251 C380,251 380,151 404,151" stroke="#9A9A9A" stroke-width="1.6" fill="none"/>
+<rect x="10" y="286" width="340" height="42" rx="6" fill="#F6F6F4" stroke="#9A9A9A" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="24" y="313" font-size="16" style="fill:#6B6B6B"><tspan class="b">A coauthor</tspan> comments</text>
+<text x="338" y="313" font-size="14.5" class="i" text-anchor="end" style="fill:#6B6B6B">fixed, not learned</text>
+<path d="M404,151 L414,151" stroke="#9A9A9A" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<rect x="418" y="108" width="160" height="86" rx="6" fill="#F6F6F4" stroke="#9A9A9A" stroke-width="1.6"/>
+<text x="498" y="138" font-size="16" class="b" text-anchor="middle">Evidence log</text>
+<text x="498" y="160" font-size="14.5" text-anchor="middle" style="fill:#6B6B6B">each event with</text>
+<text x="498" y="179" font-size="14.5" text-anchor="middle" style="fill:#6B6B6B">its before and after</text>
+<path d="M580,151 L606,151" stroke="#9A9A9A" stroke-width="1.6" fill="none" marker-end="url(#a)"/>
+<rect x="612" y="12" width="346" height="316" rx="8" fill="#FBF6E9" stroke="#C6952C" stroke-width="1.8"/>
+<text x="630" y="40" font-size="17" class="b" style="fill:#8A6410">STYLE.md</text>
+<text x="940" y="40" font-size="14.5" text-anchor="end" style="fill:#8A6410">yours to edit</text>
+<line x1="630" y1="50" x2="940" y2="50" stroke="#E5D3A6" stroke-width="1.2"/>
+<text x="630" y="76" font-size="15.5" class="b">Base rules</text>
+<text x="940" y="76" font-size="14.5" text-anchor="end" style="fill:#6B6B6B">only you add these</text>
+<text x="630" y="102" font-size="15.5" class="b">Confirmed rules</text>
+<text x="940" y="102" font-size="14.5" text-anchor="end" style="fill:#6B6B6B">3 pieces of evidence</text>
+<text x="630" y="128" font-size="15.5" class="b">Tentative patterns</text>
+<text x="940" y="128" font-size="14.5" text-anchor="end" style="fill:#6B6B6B">seen once or twice</text>
+<text x="630" y="154" font-size="15.5" class="b">Pacing and script</text>
+<rect x="630" y="164" width="310" height="76" rx="4" fill="#FFFFFF" stroke="#E5D3A6" stroke-width="1.2"/>
+<text x="642" y="186" font-size="15" style="fill:#6B6B6B">pace</text><text x="738" y="186" font-size="15" class="i">135 words a minute (seed)</text>
+<text x="642" y="208" font-size="15" style="fill:#6B6B6B">opening</text><text x="738" y="208" font-size="15" class="i">a question, then the claim</text>
+<text x="642" y="230" font-size="15" style="fill:#6B6B6B">hand-over</text><text x="738" y="230" font-size="15" class="i">one bridge line per slide</text>
+<text x="630" y="264" font-size="15.5" class="b">What you undid</text>
+<text x="940" y="264" font-size="14.5" text-anchor="end" style="fill:#6B6B6B">never repeated</text>
+<text x="630" y="296" font-size="14.5" style="fill:#6B6B6B">Every change is a git commit you can undo.</text>
+<path d="M784,332 C784,350 704,354 622,354" stroke="#6D5398" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ap)"/>
+<text x="614" y="359" font-size="15" text-anchor="end" style="fill:#6D5398">the agent reads it before every slide</text>
+</svg>

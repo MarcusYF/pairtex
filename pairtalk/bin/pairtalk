@@ -1,0 +1,1872 @@
+#!/usr/bin/env python3
+"""pairtalk (PairTalk): talk slides and a speaker script that your coding agent fixes from comments, and a talk-style
+guide it learns from you.
+
+A talk is a folder of HTML slides (one JavaScript file per slide, builds per click) with a speaker script, SCRIPT.md.
+`pairtalk serve` shows it on your computer with a comment panel: comment on any slide and click, mark a box, attach a
+screenshot, or edit the script. `pairtalk watch` waits for that feedback (or for comments on the optional shared site),
+prints one batch and exits; the exit wakes the agent that started it. The agent fixes the slides, answers each comment
+with `pairtalk resolve`, records what it made with `pairtalk snapshot`, learns from the evidence (`pairtalk learn`), and
+watches again. Only the owner's own comments and edits teach the style guide; coauthors' comments are fixed and answered.
+
+Data (profile, style vault, projects) lives in $PAIRTALK_HOME, else ~/.pairtalk (`pairtalk setup`). `pairtalk paths`
+prints where. The deck tools (notes, screenshots, bundle) need Node 22+ and `npm install` once in the PairTalk folder.
+
+Standard library only (Python 3.9+), plus git, Node and, for screenshots, an installed Chrome.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import base64
+import datetime as dt
+import difflib
+import fcntl
+import hashlib
+import html
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import xml.etree.ElementTree as ET
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+VERSION = "0.1.0"
+APP = Path(__file__).resolve().parent.parent
+SUITE = APP.parent
+TEMPLATES = APP / "templates"
+TEMPLATE_DECK = APP / "template"
+EXAMPLES = APP / "examples"
+TOOLS = APP / "tools"
+CLOUDFLARE = APP / "cloudflare"
+DEFAULT_HOME = Path.home() / ".pairtalk"
+
+EXIT_BATCH, EXIT_NOTHING, EXIT_REMOTE, EXIT_CONFLICT, EXIT_BUSY, EXIT_LOCKED, EXIT_TOOL, EXIT_GUARD = 0, 1, 2, 3, 4, 5, 6, 7
+SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
+SID = re.compile(r"[A-Za-z0-9_-]{1,60}")
+CID = re.compile(r"[0-9a-z]{9}-[0-9a-f]{8}")
+EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+MAGIC = {"image/png": lambda b: b[:8] == b"\x89PNG\r\n\x1a\n", "image/jpeg": lambda b: b[:3] == b"\xff\xd8\xff",
+         "image/webp": lambda b: b[:4] == b"RIFF" and b[8:12] == b"WEBP"}
+# words that make a comment a general preference ("stated" evidence) rather than a request about one slide
+GENERAL = re.compile(r"\b(always|never|every time|everywhere|from now on|in general|as a rule|in every talk|on every slide|"
+                     r"all slides|any slide|whenever|don't ever|do not ever)\b|以后|永远|总是|不要再|每次|所有的?slide|每一页|都要|一律",
+                     re.I)
+
+
+class PtError(Exception):
+    def __init__(self, message: str, code: int = 1):
+        super().__init__(message)
+        self.code = code
+
+
+# ------------------------------------------------------------------------------------------------- data home
+
+def data_home() -> Path:
+    env = os.environ.get("PAIRTALK_HOME")
+    return Path(env).expanduser() if env else DEFAULT_HOME
+
+
+DATA = data_home()
+PROFILE_PATH = DATA / "profile.json"
+VAULT = DATA / "vault"
+STYLE_MD = VAULT / "STYLE.md"
+EVIDENCE = VAULT / "evidence.jsonl"
+SEEDS = VAULT / "seed"
+PROJECTS = DATA / "projects"
+
+
+def load_profile() -> dict:
+    if not PROFILE_PATH.exists():
+        return {}
+    try:
+        return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        sys.exit(f"pairtalk: {PROFILE_PATH} is not valid JSON: {exc}")
+
+
+PROFILE = load_profile()
+
+
+def pairdeck_style() -> Path:
+    home = os.environ.get("PAIRDECK_HOME")
+    return (Path(home).expanduser() if home else Path.home() / ".pairdeck") / "vault" / "STYLE.md"
+
+
+def now_iso() -> str:
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def sha1(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def read_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise PtError(f"{path} is not valid JSON ({exc}); move it aside and retry")
+
+
+def write_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class FileLock:
+    """An exclusive lock on a side file, held for a `with` block (several processes share the inbox and the evidence)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(self.path, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def norm_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip()).casefold()
+
+
+def owner_names() -> set:
+    names = {norm_name(PROFILE.get("name", "")), norm_name(PROFILE.get("handle", ""))}
+    names |= {norm_name(a) for a in PROFILE.get("aliases", [])}
+    return {n for n in names if n}
+
+
+def is_owner(author: str, local: bool) -> bool:
+    """The owner wrote it: their name or handle, or, on the review server on this computer, no name at all."""
+    a = norm_name(author)
+    return (not a and local) or (bool(a) and a in owner_names())
+
+
+def clip(text: str, n: int = 600) -> str:
+    text = text or ""
+    return text if len(text) <= n else text[:n] + " …[clipped]"
+
+
+def word_diff(a: str, b: str, ctx: int = 8) -> str:
+    """A compact word diff: unchanged runs shortened, removed words in [-…-], added words in {+…+}."""
+    wa, wb = (a or "").split(), (b or "").split()
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, wa, wb, autojunk=False).get_opcodes():
+        if op == "equal":
+            run = wa[i1:i2]
+            out.append(" ".join(run) if len(run) <= 2 * ctx else " ".join(run[:ctx]) + " … " + " ".join(run[-ctx:]))
+        else:
+            if i2 > i1:
+                out.append("[-" + " ".join(wa[i1:i2]) + "-]")
+            if j2 > j1:
+                out.append("{+" + " ".join(wb[j1:j2]) + "+}")
+    return " ".join(x for x in out if x)
+
+
+def line_diff(a: str, b: str, name: str) -> str:
+    return "".join(difflib.unified_diff((a or "").splitlines(True), (b or "").splitlines(True), f"{name} (before)",
+                                        f"{name} (now)", n=2))
+
+
+def style_summary(path: Path = STYLE_MD) -> str:
+    if not path.exists():
+        return f"{path} (missing" + (": `pairtalk setup` creates it)" if path == STYLE_MD else ")")
+    text = path.read_text(encoding="utf-8")
+    rules = len(re.findall(r"^### ", text, re.M))
+    return f"{path} ({rules} entries, sha {sha1(text)[:7]})"
+
+
+# ------------------------------------------------------------------------------------------------- evidence
+
+def _evidence_rows() -> list:
+    if not EVIDENCE.exists():
+        return []
+    rows = []
+    for line in EVIDENCE.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def append_events(events: list) -> list:
+    """Append events to evidence.jsonl under its lock; ids continue after the highest id ever used."""
+    if not events:
+        return []
+    VAULT.mkdir(parents=True, exist_ok=True)
+    ids = []
+    with FileLock(VAULT / ".evidence.lock"):
+        top = 0
+        for e in _evidence_rows():
+            m = re.fullmatch(r"E(\d+)", str(e.get("id", "")))
+            top = max(top, int(m.group(1)) if m else 0)
+        meta = read_json(VAULT / ".evidence-next.json", {})
+        top = max(top, int(meta.get("last", 0)))
+        with open(EVIDENCE, "a", encoding="utf-8") as f:
+            for e in events:
+                top += 1
+                e = {"id": f"E{top:04d}", "date": now_iso(), **e}
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+                ids.append(e["id"])
+        write_json(VAULT / ".evidence-next.json", {"last": top})
+    return ids
+
+
+def pending_events(project: str | None = None, every: bool = False) -> list:
+    rows = [e for e in _evidence_rows() if not e.get("acked") and not e.get("discarded")]
+    if every:
+        return rows
+    return [e for e in rows if e.get("project") == project]
+
+
+def mark_events(ids: set, key: str, value) -> int:
+    flagged = 0
+    with FileLock(VAULT / ".evidence.lock"):
+        out = []
+        for e in _evidence_rows():
+            if e.get("id") in ids:
+                e[key] = value
+                flagged += 1
+            out.append(json.dumps(e, ensure_ascii=False))
+        tmp = EVIDENCE.with_suffix(".tmp")
+        tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        os.replace(tmp, EVIDENCE)
+    return flagged
+
+
+def render_event(e: dict) -> str:
+    k, where = e["kind"], e.get("where", "")
+    if k == "seed":
+        st = e.get("stats", {})
+        bits = [f"{st[x]} {x.replace('_', ' ')}" for x in ("slides", "words_per_slide", "words_per_minute") if st.get(x)]
+        return f"- {e['id']} · seed {e.get('seed_id')} · {e.get('file')}" + (f" · {', '.join(bits)}" if bits else "")
+    if k == "stated":
+        return f"- {e['id']} · stated · {where}: \"{clip(e.get('text', ''), 220)}\""
+    if k in ("revised", "reverted", "own_edit"):
+        body = e.get("diff") or word_diff(e.get("before", ""), e.get("after", ""))
+        return f"- {e['id']} · {k} · {where} ({e.get('via', '')}): {clip(body, 300)}"
+    return f"- {e['id']} · {k}"
+
+
+# ------------------------------------------------------------------------------------------------- node tools
+
+def node_bin() -> str:
+    node = shutil.which("node")
+    if not node:
+        raise PtError("Node 22 or newer is needed for the deck tools (https://nodejs.org)", EXIT_TOOL)
+    return node
+
+
+def run_node(script: str, *args: str, timeout: int = 600, capture: bool = True, cwd: Path | None = None) -> str:
+    tool = TOOLS / script
+    if script == "script.mjs" and not (APP / "node_modules" / "acorn").exists():
+        raise PtError(f"the deck tools need their packages: run `npm install` once in {APP}", EXIT_TOOL)
+    r = subprocess.run([node_bin(), str(tool), *args], capture_output=capture, text=True, timeout=timeout,
+                       cwd=str(cwd) if cwd else None)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "").strip() if capture else ""
+        raise PtError(f"{script} {args[0] if args else ''} failed" + (f": {msg}" if msg else ""), EXIT_TOOL)
+    return r.stdout if capture else ""
+
+
+# ------------------------------------------------------------------------------------------------- projects
+
+class Project:
+    def __init__(self, slug: str, must_exist: bool = True):
+        if not SLUG.fullmatch(slug or ""):
+            raise PtError(f"a talk name is 1 to 40 lowercase letters, digits, - or _ (got {slug!r})")
+        self.slug = slug
+        self.dir = PROJECTS / slug
+        self.cfg_path = self.dir / "project.json"
+        if must_exist and not self.cfg_path.exists():
+            known = ", ".join(sorted(d.name for d in PROJECTS.iterdir() if (d / "project.json").exists())) \
+                if PROJECTS.exists() else ""
+            raise PtError(f"no talk named {slug}" + (f" (talks: {known})" if known else "") +
+                          ": `pairtalk new <name> --title \"…\"` makes one")
+        self.cfg = read_json(self.cfg_path, {})
+
+    @property
+    def talk(self) -> Path:
+        return Path(self.cfg["talk_dir"])
+
+    @property
+    def deck(self) -> str:
+        return self.cfg.get("deck") or self.slug
+
+    @property
+    def script(self) -> Path:
+        return self.talk / "SCRIPT.md"
+
+    def save(self) -> None:
+        write_json(self.cfg_path, self.cfg)
+
+    # local review inbox (written by `pairtalk serve`)
+    @property
+    def inbox(self) -> Path:
+        return self.dir / "inbox"
+
+    def path(self, name: str) -> Path:
+        return self.dir / name
+
+
+def deck_name_of(talk: Path) -> str:
+    index = talk / "index.html"
+    if not index.exists():
+        raise PtError(f"no talk at {talk}: index.html is missing")
+    m = re.search(r"window\.DECK_COMMENTS\s*=\s*['\"]([^'\"]*)['\"]", index.read_text(encoding="utf-8"))
+    return m.group(1) if m else "talk"
+
+
+# ------------------------------------------------------------------------------------------------- the deck
+
+def read_deck(p: Project) -> dict:
+    """Every slide's notes, and each slide file's source without its notes (node tools/script.mjs notes)."""
+    return json.loads(run_node("script.mjs", "notes", "--deck", str(p.talk)))
+
+
+NOTE_RE = re.compile(r"^<!-- slide-note (\{[^\n]+\}) -->\r?\n([\s\S]*?)\r?\n<!-- /slide-note -->\s*$", re.M)
+
+
+def read_script(path: Path) -> dict:
+    """SCRIPT.md blocks: key "SID.k" -> {text, base, edited}; edited when the text no longer matches its base hash."""
+    if not path.exists():
+        return {}
+    out = {}
+    for m in NOTE_RE.finditer(path.read_text(encoding="utf-8")):
+        meta = json.loads(m.group(1))
+        text = m.group(2).replace("\r\n", "\n")
+        out[f"{meta['sid']}.{meta['k']}"] = {"sid": meta["sid"], "k": meta["k"], "text": text, "base": meta.get("base"),
+                                             "edited": hashlib.sha256(text.encode("utf-8")).hexdigest() != meta.get("base")}
+    return out
+
+
+def deck_state(deck: dict) -> tuple:
+    notes, slides, where = {}, {}, {}
+    for s in deck["slides"]:
+        for k, t in enumerate(s["notes"]):
+            notes[f"{s['sid']}.{k}"] = t
+        where[s["sid"]] = s
+    for f, src in deck["files"].items():
+        slides[f] = src
+    return notes, slides, where
+
+
+def baseline_path(p: Project) -> Path:
+    return p.path("baseline.json")
+
+
+def load_baseline(p: Project) -> dict:
+    b = read_json(baseline_path(p), {})
+    b.setdefault("notes", {})
+    b.setdefault("slides", {})
+    b.setdefault("pending", {"notes": {}, "slides": {}})
+    b.setdefault("batch_open", False)
+    return b
+
+
+def effective(b: dict, kind: str, key: str) -> dict | None:
+    return b["pending"][kind].get(key) or b[kind].get(key)
+
+
+def take_snapshot(p: Project, by_default: str = "agent") -> dict:
+    """Record the talk as the agent made it: the baseline that later edits are compared with."""
+    run_node("script.mjs", "sync", "--deck", str(p.talk))
+    deck = read_deck(p)
+    notes, slides, _ = deck_state(deck)
+    b = load_baseline(p)
+    changed = {"notes": [], "slides": []}
+    for kind, now in (("notes", notes), ("slides", slides)):
+        old, pend, new = b[kind], b["pending"][kind], {}
+        for key, text in now.items():
+            base, pe = old.get(key), pend.get(key)
+            if pe and pe["text"] == text:
+                new[key] = {"text": text, "by": pe["by"], "prev": base["text"] if base else None}
+            elif base is None:
+                new[key] = {"text": text, "by": by_default, "prev": None}
+                changed[kind].append(key)
+            elif base["text"] != text:
+                new[key] = {"text": text, "by": "agent", "prev": base["text"]}
+                changed[kind].append(key)
+            else:
+                new[key] = base
+        b[kind] = new
+    b["pending"] = {"notes": {}, "slides": {}}
+    b["batch_open"] = False
+    b["taken"] = now_iso()
+    write_json(baseline_path(p), b)
+    return changed
+
+
+def classify(base: dict | None, after: str) -> str:
+    """What an owner's change to a note or slide is, given who made the version it replaced."""
+    if base is None:
+        return "own_edit"
+    if base.get("by") == "agent":
+        return "reverted" if base.get("prev") is not None and after == base["prev"] else "revised"
+    return "own_edit"
+
+
+# ------------------------------------------------------------------------------------------------- the inbox
+
+def inbox_load(p: Project) -> tuple:
+    return read_json(p.inbox / "comments.json", []), read_json(p.inbox / "script_edits.json", [])
+
+
+def inbox_lock(p: Project) -> FileLock:
+    return FileLock(p.inbox / ".lock")
+
+
+def new_cid() -> str:
+    t = int(time.time() * 1000)
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    s = ""
+    while t:
+        t, r = divmod(t, 36)
+        s = digits[r] + s
+    return s.rjust(9, "0")[-9:] + "-" + secrets.token_hex(4)
+
+
+def parse_box(v):
+    if v is None:
+        return None
+    if not isinstance(v, dict) or not all(isinstance(v.get(k), (int, float)) for k in "xywh"):
+        return False
+    x, y, w, h = (float(v[k]) for k in "xywh")
+    if w < 0:
+        x, w = x + w, -w
+    if h < 0:
+        y, h = y + h, -h
+    x0, y0, x1, y1 = max(0, min(x, 1920)), max(0, min(y, 1080)), max(0, min(x + w, 1920)), max(0, min(y + h, 1080))
+    box = {"x": round(x0, 1), "y": round(y0, 1), "w": round(x1 - x0, 1), "h": round(y1 - y0, 1)}
+    return box if box["w"] >= 1 and box["h"] >= 1 else False
+
+
+# ------------------------------------------------------------------------------------------------- the shared site (D1)
+
+def wrangler_bin() -> str:
+    for cand in (os.environ.get("PAIRTALK_WRANGLER"), str(APP / "node_modules" / ".bin" / "wrangler"), shutil.which("wrangler")):
+        if cand and Path(cand).exists():
+            return cand
+    raise PtError(f"the shared site needs Wrangler: run `npm install wrangler@4` in {APP}", EXIT_TOOL)
+
+
+def q(value) -> str:
+    text = str(value)
+    if "\0" in text:
+        raise PtError("text contains a NUL character")
+    return "'" + text.replace("'", "''") + "'"
+
+
+def stage_dir(p: Project) -> Path:
+    return p.path("site-build")
+
+
+def d1(p: Project, statement: str) -> list:
+    r = p.cfg.get("remote") or {}
+    database = r.get("database", "pairtalk-comments")
+    if r.get("config"):
+        args = ["d1", "execute", database, "--remote", "--config", r["config"]]
+    else:   # the local site from `pairtalk publish --dev`
+        st = stage_dir(p)
+        args = ["d1", "execute", database, "--local", "--config", str(st / "wrangler.toml"), "--persist-to", str(st / ".wrangler" / "state")]
+    env = dict(os.environ, WRANGLER_SEND_METRICS="false")
+    try:
+        out = subprocess.run([wrangler_bin(), *args, "--json", "--command", statement], capture_output=True, text=True,
+                             timeout=180, env=env, cwd=str(stage_dir(p)) if stage_dir(p).exists() else None)
+    except subprocess.TimeoutExpired:
+        raise PtError("the shared site did not answer within 3 minutes", EXIT_REMOTE)
+    if out.returncode != 0:
+        raise PtError("the shared site's database could not be read (check `pairtalk remote` settings and `wrangler login`)",
+                      EXIT_REMOTE)
+    text = out.stdout
+    start = text.find("[")
+    try:
+        results = json.loads(text[start:])
+    except ValueError:
+        raise PtError("Wrangler did not return a D1 JSON result", EXIT_REMOTE)
+    if not isinstance(results, list) or any(x.get("success") is False for x in results):
+        raise PtError("D1 returned an unsuccessful result", EXIT_REMOTE)
+    return [row for x in results for row in x.get("results", [])]
+
+
+def remote_comments(p: Project, include_done: bool = False) -> list:
+    rows = d1(p, "SELECT cid, n, k, sid, title, author, text, created, status, reply, resolved, box FROM comments "
+                 f"WHERE deck = {q(p.deck)}" + ("" if include_done else " AND status = 'open'") + " ORDER BY created, cid;")
+    for c in rows:
+        try:
+            c["box"] = parse_box(json.loads(c["box"])) if c.get("box") else None
+        except ValueError:
+            c["box"] = None
+        c["box"] = c["box"] or None
+    return rows
+
+
+def remote_images(p: Project, cid: str) -> list:
+    if not CID.fullmatch(cid):
+        raise PtError("invalid comment id")
+    rows = d1(p, f"SELECT i, mime, w, h, bytes, hex(data) AS hx FROM comment_images WHERE cid = {q(cid)} ORDER BY i;")
+    out = []
+    for r in rows:
+        if r.get("mime") not in EXT or not re.fullmatch(r"(?:[0-9a-fA-F]{2})+", r.get("hx") or ""):
+            continue
+        out.append({**r, "data": bytes.fromhex(r["hx"])})
+    return out
+
+
+def remote_edits(p: Project) -> list:
+    return d1(p, "SELECT eid, sid, k, text, orig, updated, author FROM script_edits "
+                 f"WHERE deck = {q(p.deck)} AND status = 'open' ORDER BY updated, eid;")
+
+
+# ------------------------------------------------------------------------------------------------- watch lock
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def lock_owner(p: Project) -> dict | None:
+    lp = p.path("watch.lock")
+    if not lp.exists():
+        return None
+    try:
+        info = json.loads(lp.read_text())
+    except (OSError, ValueError):
+        return None
+    return info if pid_alive(int(info.get("pid", 0))) else None
+
+
+def acquire_lock(p: Project, takeover: bool) -> None:
+    owner = lock_owner(p)
+    if owner and owner["pid"] != os.getpid():
+        if not takeover:
+            raise PtError(f"another watcher is running for {p.slug} (pid {owner['pid']}, since {owner['started']}). "
+                          "Stop it, or pass --takeover to stop it and watch here.", EXIT_LOCKED)
+        os.kill(int(owner["pid"]), signal.SIGTERM)
+        for _ in range(50):
+            if not pid_alive(int(owner["pid"])):
+                break
+            time.sleep(0.1)
+    lp = p.path("watch.lock")
+    lp.write_text(json.dumps({"pid": os.getpid(), "started": now_iso()}))
+
+    def release(*_):
+        try:
+            if json.loads(lp.read_text()).get("pid") == os.getpid():
+                lp.unlink()
+        except (OSError, ValueError):
+            pass
+
+    atexit.register(release)
+
+    def on_signal(signum, _frame):
+        release()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+
+# ------------------------------------------------------------------------------------------------- watch
+
+def gather(p: Project, remote: bool, state: dict, quiet: float) -> dict:
+    """Everything new since the last batch: comments, browser script edits, SCRIPT.md edits, slide-file edits."""
+    seen_c, seen_e = set(state.get("seen_comments", [])), state.get("seen_edits", {})
+    if remote:
+        comments = [c for c in remote_comments(p) if c["cid"] not in seen_c]
+        edits = remote_edits(p)
+    else:
+        all_c, edits = inbox_load(p)
+        comments = [c for c in all_c if c.get("status") == "open" and c["cid"] not in seen_c]
+        edits = [e for e in edits if e.get("status") == "open"]
+    now = time.time()
+
+    def settled(e):
+        try:
+            t = dt.datetime.fromisoformat(str(e["updated"]).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return True
+        return now - t >= quiet
+
+    edits = [e for e in edits if seen_e.get(e["eid"]) != e["updated"] and settled(e)]
+    b = load_baseline(p)
+    deck = read_deck(p)
+    notes, slides, where = deck_state(deck)
+    script = read_script(p.script)
+    script_changes = []
+    for key, blk in script.items():
+        cur = effective(b, "notes", key)
+        if blk["edited"] and (cur is None or blk["text"] != cur["text"]):
+            script_changes.append({"key": key, "sid": blk["sid"], "k": blk["k"], "before": cur["text"] if cur else notes.get(key, ""),
+                                   "after": blk["text"], "base": cur})
+    slide_changes, note_changes = [], []
+    def known(kind, key, text):   # the text the agent recorded, or an edit already reported and not yet applied
+        return any(x and x["text"] == text for x in (b[kind].get(key), b["pending"][kind].get(key)))
+
+    for f, src in slides.items():
+        cur = effective(b, "slides", f)
+        if cur is not None and not known("slides", f, src):
+            slide_changes.append({"file": f, "before": cur["text"], "after": src, "base": cur})
+        elif cur is None and b["slides"]:
+            slide_changes.append({"file": f, "before": "", "after": src, "base": None})
+    for f in set(b["slides"]) - set(slides):
+        slide_changes.append({"file": f, "before": b["slides"][f]["text"], "after": "", "base": b["slides"][f]})
+    for key, text in notes.items():   # notes edited in a slide file directly (not through SCRIPT.md or the browser)
+        cur = effective(b, "notes", key)
+        if cur is not None and not known("notes", key, text):
+            note_changes.append({"key": key, "sid": key.rsplit(".", 1)[0], "k": int(key.rsplit(".", 1)[1]),
+                                 "before": cur["text"], "after": text, "base": cur})
+    return {"comments": comments, "edits": edits, "script": script_changes, "slides": slide_changes,
+            "notes": note_changes, "where": where, "baseline": b}
+
+
+def signature(found: dict) -> str:
+    parts = [sorted(c["cid"] for c in found["comments"]), sorted((e["eid"], e["updated"]) for e in found["edits"]),
+             sorted((x["key"], x["after"]) for x in found["script"] + found["notes"]),
+             sorted((x["file"], sha1(x["after"])) for x in found["slides"])]
+    return sha1(json.dumps(parts))
+
+
+def anything(found: dict) -> bool:
+    return any(found[k] for k in ("comments", "edits", "script", "slides", "notes"))
+
+
+def emit_batch(p: Project, found: dict, remote: bool, state: dict) -> str:
+    b = found["baseline"]
+    local = not remote
+    events, lines = [], []
+    where = found["where"]
+    owner = PROFILE.get("name") or "the owner"
+    att_dir = p.path("attachments")
+    for c in found["comments"]:
+        mine = is_owner(c.get("author", ""), local)
+        who = c.get("author") or (owner if mine else "(no name)")
+        s = where.get(c.get("sid")) or {}
+        head = f"### {c['cid']} · slide {c.get('n')} ({c.get('sid')}) · click {c.get('k', 0)} · by {who}"
+        head += " (owner)" if mine else " (coauthor: fix it and answer it; it does not teach the style guide)"
+        lines += [head, ""]
+        if s.get("title") or c.get("title"):
+            lines.append(f"Slide: {s.get('title') or c.get('title')} · file {s.get('file', '?')}")
+        if c.get("box"):
+            bx = c["box"]
+            lines.append(f"Box: x={bx['x']} y={bx['y']} w={bx['w']} h={bx['h']} (1920×1080 slide coordinates; "
+                         f"`pairtalk shots {p.slug} --ids {c.get('sid')} --click {c.get('k', 0)} --box {bx['x']},{bx['y']},{bx['w']},{bx['h']}` draws it)")
+        files = []
+        if remote:
+            for im in remote_images(p, c["cid"]):
+                f = att_dir / f"{c['cid']}_{im['i']}.{EXT[im['mime']]}"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(im["data"])
+                files.append(f)
+        else:
+            files = [p.inbox / "images" / im["file"] for im in c.get("images", []) if im.get("file")]
+        for f in files:
+            lines.append(f"Attachment: {f}")
+        lines += [""] + ["> " + x for x in (c.get("text") or "(no text: see the box or the attachment)").splitlines()] + [""]
+        if mine and c.get("text") and GENERAL.search(c["text"]):
+            events.append({"kind": "stated", "project": p.slug, "cid": c["cid"], "where": f"comment on {c.get('sid')} click {c.get('k', 0)}",
+                           "text": c["text"], "via": "comment"})
+    edit_lines = []
+    for x in found["script"]:
+        kind = classify(x["base"], x["after"])
+        events.append({"kind": kind, "project": p.slug, "target": "note", "sid": x["sid"], "k": x["k"],
+                       "where": f"script {x['key']}", "via": "SCRIPT.md", "before": x["before"], "after": x["after"],
+                       "diff": word_diff(x["before"], x["after"])})
+        b["pending"]["notes"][x["key"]] = {"text": x["after"], "by": "owner"}
+        edit_lines += [f"- {x['key']} (slide {x['sid']}, {'on entry' if x['k'] == 0 else 'click ' + str(x['k'])}) · by {owner} (owner) · in SCRIPT.md",
+                       f"  change: {clip(word_diff(x['before'], x['after']), 700)}"]
+    for e in found["edits"]:
+        mine = is_owner(e.get("author", ""), local)
+        key = f"{e['sid']}.{e['k']}"
+        cur = effective(b, "notes", key)
+        who = e.get("author") or (owner if mine else "(no name)")
+        if e.get("text") is None:
+            edit_lines.append(f"- {key} · by {who} · withdrawn in the browser (no change) · edit id {e['eid']}")
+        else:
+            edit_lines += [f"- {key} · by {who} ({'owner' if mine else 'coauthor'}) · in the browser · edit id {e['eid']}",
+                           f"  change: {clip(word_diff(e.get('orig', ''), e['text']), 700)}"]
+            if mine:
+                events.append({"kind": classify(cur, e["text"]), "project": p.slug, "target": "note", "sid": e["sid"], "k": e["k"],
+                               "where": f"script {key}", "via": "browser", "before": cur["text"] if cur else e.get("orig", ""),
+                               "after": e["text"], "diff": word_diff(cur["text"] if cur else e.get("orig", ""), e["text"])})
+            b["pending"]["notes"][key] = {"text": e["text"], "by": "owner" if mine else "coauthor"}
+    for x in found["notes"]:
+        events.append({"kind": classify(x["base"], x["after"]), "project": p.slug, "target": "note", "sid": x["sid"], "k": x["k"],
+                       "where": f"script {x['key']}", "via": "slide file", "before": x["before"], "after": x["after"],
+                       "diff": word_diff(x["before"], x["after"])})
+        b["pending"]["notes"][x["key"]] = {"text": x["after"], "by": "owner"}
+        edit_lines += [f"- {x['key']} · by {owner} (owner) · in the slide file", f"  change: {clip(word_diff(x['before'], x['after']), 700)}"]
+    slide_lines = []
+    for x in found["slides"]:
+        diff = line_diff(x["before"], x["after"], x["file"])
+        events.append({"kind": classify(x["base"], x["after"]), "project": p.slug, "target": "slide", "file": x["file"],
+                       "where": f"slide file {x['file']}", "via": "slide file", "before": x["before"], "after": x["after"],
+                       "diff": clip(diff, 4000)})
+        b["pending"]["slides"][x["file"]] = {"text": x["after"], "by": "owner"}
+        slide_lines += [f"- {x['file']} · edited by {owner} (owner)", "```diff", clip(diff, 2500).rstrip(), "```"]
+    ids = append_events(events)
+    b["batch_open"] = True
+    write_json(baseline_path(p), b)
+    state.setdefault("seen_comments", []).extend(c["cid"] for c in found["comments"])
+    for e in found["edits"]:
+        state.setdefault("seen_edits", {})[e["eid"]] = e["updated"]
+    write_json(p.path("state.json"), state)
+
+    nc, ne = len(found["comments"]), len(edit_lines and [x for x in edit_lines if x.startswith("- ")])
+    title = ", ".join(x for x in (f"{nc} comment{'s' if nc != 1 else ''}" if nc else "",
+                                  f"{ne} script edit{'s' if ne != 1 else ''}" if ne else "",
+                                  f"{len(found['slides'])} slide edit{'s' if len(found['slides']) != 1 else ''}" if found["slides"] else "") if x)
+    look = pairdeck_style()
+    out = [f"# PairTalk · {p.slug} · {title} · {now_iso()}", "",
+           f"Talk: {p.talk} ({'the shared site' if remote else 'the review server, `pairtalk serve ' + p.slug + '`'})",
+           f"Talk style: {style_summary()}",
+           f"Visual look: {style_summary(look) if look.exists() else 'no PairDeck style guide (' + str(look) + ')'}",
+           f"Talk notes: {p.path('NOTES.md')}", ""]
+    if found["comments"]:
+        out += ["## Comments", ""] + lines
+    if edit_lines:
+        out += ["## Script edits", ""] + edit_lines + [""]
+    if slide_lines:
+        out += ["## Slide files edited by the owner", ""] + slide_lines + [""]
+    pend = pending_events(p.slug)
+    if pend:
+        out += [f"## Style evidence not yet learned ({len(pend)})", ""] + [render_event(e) for e in pend[:40]]
+        if len(pend) > 40:
+            out.append(f"- … and {len(pend) - 40} more (`pairtalk learn {p.slug}`)")
+        out.append("")
+    cids = " ".join(c["cid"] for c in found["comments"]) or "(none)"
+    r = " --remote" if remote else ""
+    out += ["## Next", "",
+            f"1. Read the talk style (if its sha changed), the visual look, and the talk notes. Comments: {cids}.",
+            f"2. Fix each comment in {p.talk / 'slides'}; check every changed click: `pairtalk shots {p.slug} --ids <SID>`.",
+            f"3. Script edits: `pairtalk script apply {p.slug}{r}` (SCRIPT.md and the browser's edits).",
+            f"4. `pairtalk snapshot {p.slug}` records what you made" + ("; then `pairtalk publish " + p.slug + "`." if remote else "."),
+            f"5. Answer each comment: `pairtalk resolve {p.slug} <id> \"reply\"{r}`.",
+            f"6. Learn: `pairtalk learn {p.slug}`, update {STYLE_MD}, then `pairtalk learn {p.slug} --ack <ids>`.",
+            f"7. Start `pairtalk watch {p.slug}{r}` again in the background."]
+    text = "\n".join(out) + "\n"
+    bd = p.path("batches")
+    bd.mkdir(parents=True, exist_ok=True)
+    (bd / (dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".md")).write_text(text, encoding="utf-8")
+    return text
+
+
+def cmd_watch(args) -> int:
+    p = Project(args.slug)
+    remote = bool(args.remote)
+    if remote and not (p.cfg.get("remote") or stage_dir(p).exists()):
+        raise PtError(f"no shared site for {p.slug}: `pairtalk remote {p.slug} --config … --pages-project …` first")
+    acquire_lock(p, args.takeover)
+    state = read_json(p.path("state.json"), {})
+    b = load_baseline(p)
+    if not b.get("notes") and not b.get("slides"):
+        take_snapshot(p)
+        b = load_baseline(p)
+    interval = args.interval or (20.0 if remote else 2.0)
+    settle = 0.0 if args.once else (args.settle if args.settle is not None else 10.0)
+    quiet = 0.0 if args.once else (args.quiet if args.quiet is not None else 20.0)
+    start, last_sig, since, failures = time.time(), None, None, 0
+    first = True
+    while True:
+        try:
+            found = gather(p, remote, state, quiet)
+            failures = 0
+        except PtError as exc:
+            if exc.code != EXIT_REMOTE or args.once:
+                raise
+            failures += 1
+            if failures >= args.max_failures:
+                raise
+            print(f"pairtalk watch: {exc} (retrying)", file=sys.stderr)
+            time.sleep(min(120, interval * failures))
+            continue
+        if first and b.get("batch_open") and (found["slides"] or found["notes"]) and not args.force:
+            raise PtError("the slides changed since the last batch, and no `pairtalk snapshot` recorded the agent's work. "
+                          f"Run `pairtalk snapshot {p.slug}` after fixing a batch (or pass --force if these edits are the "
+                          "owner's).", EXIT_BUSY)
+        first = False
+        if anything(found):
+            sig = signature(found)
+            if sig != last_sig:
+                last_sig, since = sig, time.time()
+            if time.time() - since >= settle:
+                print(emit_batch(p, found, remote, state), end="")
+                return EXIT_BATCH
+        else:
+            last_sig = since = None
+        if args.once:
+            print("nothing new")
+            return EXIT_NOTHING
+        if args.max_hours and time.time() - start > args.max_hours * 3600:
+            print(f"nothing new in {args.max_hours} h")
+            return EXIT_NOTHING
+        time.sleep(interval)
+
+
+# ------------------------------------------------------------------------------------------------- resolve, snapshot
+
+def cmd_resolve(args) -> int:
+    p = Project(args.slug)
+    reply = (Path(args.reply_file).read_text(encoding="utf-8") if args.reply_file else args.reply or "").strip()
+    if not reply or len(reply) > 4000:
+        raise PtError("give a reply of 1 to 4000 characters")
+    if not CID.fullmatch(args.cid):
+        raise PtError(f"{args.cid!r} is not a comment id (the batch lists them, e.g. 0mhb2k3x1-1a2b3c4d)")
+    resolved = now_iso()
+    if args.remote:
+        rows = d1(p, f"UPDATE comments SET status = 'done', reply = {q(reply)}, resolved = {q(resolved)} "
+                     f"WHERE cid = {q(args.cid)} AND deck = {q(p.deck)}; SELECT changes() AS changed; "
+                     f"SELECT cid, n, k, sid, title, author, text FROM comments WHERE cid = {q(args.cid)} AND deck = {q(p.deck)};")
+        comment = next((r for r in rows if r.get("cid") == args.cid), None)
+        if not comment or next((r for r in rows if "changed" in r), {}).get("changed") != 1:
+            raise PtError(f"comment {args.cid} was not found on the shared site")
+        local = False
+    else:
+        with inbox_lock(p):
+            comments, edits = inbox_load(p)
+            comment = next((c for c in comments if c["cid"] == args.cid), None)
+            if not comment:
+                raise PtError(f"comment {args.cid} is not in {p.slug}'s inbox")
+            comment.update(status="done", reply=reply, resolved=resolved)
+            write_json(p.inbox / "comments.json", comments)
+        local = True
+    archive = p.path("archive") / "COMMENTS.md"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with open(archive, "a", encoding="utf-8") as f:
+        f.write(f"\n## {args.cid} · slide {comment.get('n')} ({comment.get('sid')}), click {comment.get('k', 0)} · "
+                f"{comment.get('author') or '(no name)'}\n\n{comment.get('text') or '(no text)'}\n\nReply ({resolved}): {reply}\n")
+    if args.stated:
+        if not is_owner(comment.get("author", ""), local):
+            raise PtError("only the owner's comments are style evidence: this comment is a coauthor's (the reply was saved)",
+                          EXIT_GUARD)
+        ids = append_events([{"kind": "stated", "project": p.slug, "cid": args.cid, "where": f"comment on {comment.get('sid')}",
+                              "text": args.stated, "comment": comment.get("text", ""), "via": "comment"}])
+        print(f"recorded {ids[0]} (stated): {args.stated}")
+    print(f"{args.cid} resolved on {'the shared site' if args.remote else 'the review server'}: {clip(reply, 120)}")
+    return 0
+
+
+def cmd_snapshot(args) -> int:
+    p = Project(args.slug)
+    ch = take_snapshot(p)
+    n, s = len(ch["notes"]), len(ch["slides"])
+    print(f"snapshot of {p.slug}: {n} note{'s' if n != 1 else ''} and {s} slide file{'s' if s != 1 else ''} "
+          f"changed by the agent since the last snapshot" + (f" ({', '.join((ch['notes'] + ch['slides'])[:8])})" if n + s else ""))
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------- script
+
+def cmd_script(args) -> int:
+    p = Project(args.slug)
+    if args.action == "export":
+        out = run_node("script.mjs", "export", "--deck", str(p.talk), *(["--force"] if args.force else []))
+        print(out.strip())
+        return 0
+    dry = ["--dry-run"] if args.dry_run else []
+    print(run_node("script.mjs", "apply", "--deck", str(p.talk), *dry).strip() + " (SCRIPT.md)")
+    if args.remote:
+        edits = remote_edits(p)
+    else:
+        edits = [e for e in inbox_load(p)[1] if e.get("status") == "open"]
+    if args.only:
+        edits = [e for e in edits if e["eid"] in args.only]
+    if not edits:
+        print("no open script edits from the browser")
+        return 0
+    changes = [{"sid": e["sid"], "k": int(e["k"]), "orig": e.get("orig") or "", "text": e["text"]} for e in edits if e.get("text") is not None]
+    applied = {"applied": [], "already": []}
+    if changes:
+        tmp = p.path("edits-to-apply.json")
+        write_json(tmp, changes)
+        try:
+            applied = json.loads(run_node("script.mjs", "apply-edits", "--deck", str(p.talk), "--edits", str(tmp), *dry))
+        finally:
+            tmp.unlink(missing_ok=True)
+    print(f"{'would apply' if args.dry_run else 'applied'} {len(applied['applied'])} browser edit(s); "
+          f"{len(applied['already'])} already in the slides; {len(edits) - len(changes)} withdrawn")
+    if args.dry_run:
+        return 0
+    stamp = now_iso()
+    if args.remote:
+        d1(p, " ".join(f"UPDATE script_edits SET status = 'done', applied = {q(stamp)} WHERE eid = {q(e['eid'])} "
+                       f"AND updated = {q(e['updated'])};" for e in edits))
+    else:
+        with inbox_lock(p):
+            comments, all_e = inbox_load(p)
+            done = {(e["eid"], e["updated"]) for e in edits}
+            for e in all_e:
+                if (e["eid"], e["updated"]) in done:
+                    e.update(status="done", applied=stamp)
+            write_json(p.inbox / "script_edits.json", all_e)
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------- serve
+
+INJECT = "<script>window.DECK_COLLABORATION=true;window.DECK_AUTHOR={author};</script>"
+TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
+         ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
+         ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".woff": "font/woff",
+         ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf", ".mp4": "video/mp4", ".webm": "video/webm",
+         ".mp3": "audio/mpeg", ".wav": "audio/wav", ".pdf": "application/pdf", ".md": "text/plain; charset=utf-8"}
+
+
+def make_handler(p: Project):
+    talk = p.talk.resolve()
+    deck = deck_name_of(talk)
+    author = json.dumps(PROFILE.get("name", "")).replace("<", "\\u003c")
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "pairtalk"
+
+        def log_message(self, fmt, *a):
+            if os.environ.get("PAIRTALK_SERVE_LOG"):
+                super().log_message(fmt, *a)
+
+        def send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def json(self, value, code: int = 200):
+            self.send(code, json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").encode("utf-8"))
+
+        def same_origin(self) -> bool:
+            site = self.headers.get("Sec-Fetch-Site")
+            if site and site not in ("same-origin", "none"):
+                return False
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host", "")
+            return origin is not None and urlparse(origin).netloc == host
+
+        def body(self, limit: int):
+            if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+                return None, (415, "Use application/json.")
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > limit:
+                return None, (413, "Request too large.")
+            try:
+                data = json.loads(self.rfile.read(n).decode("utf-8"))
+            except ValueError:
+                return None, (400, "Invalid JSON.")
+            return (data, None) if isinstance(data, dict) else (None, (400, "Invalid JSON object."))
+
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_GET(self):
+            url = urlparse(self.path)
+            qs = parse_qs(url.query)
+            if url.path == "/__comments":
+                if qs.get("deck", [""])[0] != deck:
+                    return self.json({"ok": False, "error": f"Unknown deck. Use {deck}."}, 400)
+                comments, _ = inbox_load(p)
+                pub = [{k: v for k, v in c.items() if k != "images"} | {"images": [{x: im[x] for x in ("i", "mime", "w", "h", "bytes")}
+                                                                               for im in c.get("images", [])]} for c in comments]
+                return self.json({"comments": pub})
+            if url.path == "/__comments/img":
+                cid, i = qs.get("cid", [""])[0], qs.get("i", [""])[0]
+                comments, _ = inbox_load(p)
+                c = next((c for c in comments if c["cid"] == cid), None)
+                im = next((im for im in (c or {}).get("images", []) if str(im["i"]) == i), None)
+                f = p.inbox / "images" / im["file"] if im else None
+                if not f or not f.exists():
+                    return self.json({"ok": False, "error": "Image not found."}, 404)
+                return self.send(200, f.read_bytes(), im["mime"])
+            if url.path == "/__script":
+                if qs.get("deck", [""])[0] != deck:
+                    return self.json({"ok": False, "error": f"Unknown deck. Use {deck}."}, 400)
+                _, edits = inbox_load(p)
+                return self.json({"ok": True, "rows": [{x: e.get(x) for x in ("sid", "k", "sent", "orig")} for e in edits if e["status"] == "done"],
+                                  "open": [{x: e.get(x) for x in ("sid", "k", "text", "orig", "updated")} for e in edits if e["status"] == "open"]})
+            rel = unquote(url.path).lstrip("/") or "index.html"
+            if rel.endswith("/"):
+                rel += "index.html"
+            target = (talk / rel).resolve()
+            if talk not in target.parents and target != talk or any(part.startswith(".") for part in Path(rel).parts) \
+                    or not target.is_file():
+                return self.send(404, b"Not found.", "text/plain; charset=utf-8")
+            data = target.read_bytes()
+            if target == talk / "index.html":
+                data = re.sub(rb"<head\b[^>]*>", lambda m: m.group(0) + INJECT.format(author=author).encode("utf-8"), data, count=1)
+            return self.send(200, data, TYPES.get(target.suffix.lower(), "application/octet-stream"))
+
+        def do_POST(self):
+            url = urlparse(self.path)
+            if url.path not in ("/__comments", "/__script"):
+                return self.json({"ok": False, "error": "Not found."}, 404)
+            if not self.same_origin():
+                return self.json({"ok": False, "error": "A same-origin request is required."}, 403)
+            data, err = self.body(8 * 1024 * 1024 if url.path == "/__comments" else 64 * 1024)
+            if err:
+                return self.json({"ok": False, "error": err[1]}, err[0])
+            if data.get("deck") != deck:
+                return self.json({"ok": False, "error": f"Unknown deck. Use {deck}."}, 400)
+            return self.post_comment(data) if url.path == "/__comments" else self.post_script(data)
+
+        def post_comment(self, data):
+            for key, limit in (("sid", 60), ("title", 300), ("author", 60), ("text", 4000)):
+                if not isinstance(data.get(key, ""), str) or len(data.get(key, "")) > limit:
+                    return self.json({"ok": False, "error": f"Invalid {key}."}, 400)
+            if not SID.fullmatch(data.get("sid", "")):
+                return self.json({"ok": False, "error": "Invalid slide id."}, 400)
+            try:
+                n, k = int(data.get("n")), int(data.get("k", 0))
+            except (TypeError, ValueError):
+                return self.json({"ok": False, "error": "Invalid slide or click number."}, 400)
+            box = parse_box(data.get("box"))
+            if box is False:
+                return self.json({"ok": False, "error": "Invalid box."}, 400)
+            images = data.get("images") or []
+            if not isinstance(images, list) or len(images) > 4:
+                return self.json({"ok": False, "error": "Use at most four images."}, 400)
+            decoded = []
+            for im in images:
+                try:
+                    raw = base64.b64decode(im.get("data", ""), validate=True)
+                except (ValueError, AttributeError):
+                    raw = b""
+                if im.get("mime") not in MAGIC or not raw or len(raw) > 1536 * 1024 or not MAGIC[im["mime"]](raw):
+                    return self.json({"ok": False, "error": "Images must be PNG, JPEG or WebP, at most 1.5 MB."}, 400)
+                decoded.append((im, raw))
+            text = data.get("text", "").strip()
+            if not text and not box and not decoded:
+                return self.json({"ok": False, "error": "The comment is empty."}, 400)
+            cid = new_cid()
+            saved = []
+            for i, (im, raw) in enumerate(decoded):
+                f = p.inbox / "images" / f"{cid}_{i}.{EXT[im['mime']]}"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(raw)
+                saved.append({"i": i, "mime": im["mime"], "w": im.get("w"), "h": im.get("h"), "bytes": len(raw), "file": f.name})
+            with inbox_lock(p):
+                comments, _ = inbox_load(p)
+                comments.append({"cid": cid, "deck": deck, "n": n, "k": k, "sid": data["sid"], "title": data.get("title", "").strip(),
+                                 "author": data.get("author", "").strip(), "text": text, "created": now_iso(), "status": "open",
+                                 "reply": "", "resolved": "", "box": box, "images": saved})
+                write_json(p.inbox / "comments.json", comments)
+            return self.json({"ok": True, "cid": cid})
+
+        def post_script(self, data):
+            sid, author = data.get("sid"), data.get("author") or ""
+            if not isinstance(sid, str) or not SID.fullmatch(sid) or not isinstance(author, str) or len(author) > 60:
+                return self.json({"ok": False, "error": "Invalid slide id or author."}, 400)
+            try:
+                k = int(data.get("k"))
+            except (TypeError, ValueError):
+                return self.json({"ok": False, "error": "Invalid click."}, 400)
+            text, orig = data.get("text"), data.get("orig")
+            if (text is not None and not isinstance(text, str)) or not isinstance(orig, str) or len(text or "") > 12000:
+                return self.json({"ok": False, "error": "Invalid note."}, 400)
+            if "updated" not in data:
+                return self.json({"ok": False, "error": "An expected note revision is required."}, 400)
+            eid = f"{deck}|{sid}|{k}"
+            with inbox_lock(p):
+                comments, edits = inbox_load(p)
+                prev = next((e for e in edits if e["eid"] == eid), None)
+                expected = prev["updated"] if prev and prev["status"] == "open" else None
+                if data["updated"] != expected:
+                    cur = {x: prev[x] for x in ("sid", "k", "text", "orig", "updated")} if prev and prev["status"] == "open" else None
+                    return self.json({"ok": False, "conflict": True, "error": "Another coauthor saved this note.", "current": cur}, 409)
+                stamp = dt.datetime.now(dt.timezone.utc)
+                if prev:
+                    try:
+                        stamp = max(stamp, dt.datetime.fromisoformat(prev["updated"].replace("Z", "+00:00")) + dt.timedelta(milliseconds=1))
+                    except ValueError:
+                        pass
+                updated = stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                row = {"eid": eid, "deck": deck, "sid": sid, "k": k, "text": text, "sent": text, "orig": orig, "updated": updated,
+                       "status": "open", "applied": "", "author": author.strip()}
+                if prev:
+                    prev.update(row)
+                else:
+                    edits.append(row)
+                write_json(p.inbox / "script_edits.json", edits)
+            return self.json({"ok": True, "eid": eid, "updated": updated})
+
+    return Handler
+
+
+def cmd_serve(args) -> int:
+    p = Project(args.slug)
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not args.allow_lan:
+        raise PtError("the review server answers only this computer; pass --allow-lan to serve others on your network "
+                      "(everyone who reaches it can comment as anyone), or use the shared site", EXIT_GUARD)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(p))
+    url = f"http://{args.host}:{server.server_address[1]}/"
+    print(f"serving {p.slug} from {p.talk} at {url} (comments and script edits go to {p.inbox}); Ctrl+C stops", flush=True)
+    if args.open:
+        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url], check=False)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------- new, shots, bundle
+
+TALK_GITIGNORE = "dist/\n.local/\nnode_modules/\n.DS_Store\n"
+
+
+def cmd_new(args) -> int:
+    if not PROFILE_PATH.exists():
+        raise PtError("no profile yet: `pairtalk setup --name \"Your Name\"` first")
+    p = Project(args.slug, must_exist=False)
+    if p.cfg_path.exists():
+        raise PtError(f"{args.slug} already exists (`pairtalk status {args.slug}`)")
+    meta = {}
+    if args.example:
+        ex = EXAMPLES / args.example
+        if not (ex / "slides" / "order.js").exists():
+            names = ", ".join(sorted(d.name for d in EXAMPLES.iterdir() if d.is_dir()))
+            raise PtError(f"no example {args.example!r} (examples: {names})")
+        meta = read_json(ex / "talk.json", {})
+    title = args.title or meta.get("title")
+    if not title:
+        raise PtError("give the talk a title: --title \"…\"")
+    minutes = args.minutes or meta.get("minutes") or 15
+    talk = (Path(args.dir).expanduser() if args.dir else Path.cwd() / args.slug).absolute()
+    if talk.exists() and any(talk.iterdir()):
+        raise PtError(f"{talk} is not empty: pick another --dir")
+    talk.mkdir(parents=True, exist_ok=True)
+    for item in TEMPLATE_DECK.iterdir():
+        if item.name.startswith("."):
+            continue
+        if item.is_dir():
+            shutil.copytree(item, talk / item.name)
+        else:
+            shutil.copy2(item, talk / item.name)
+    if args.example:
+        shutil.rmtree(talk / "slides")
+        shutil.copytree(EXAMPLES / args.example / "slides", talk / "slides")
+    index = (talk / "index.html").read_text(encoding="utf-8")
+    index = re.sub(r"<title>.*?</title>", lambda m: f"<title>{html.escape(title)}</title>", index, count=1)
+    index = re.sub(r"window\.DECK_COMMENTS = '[^']*'", f"window.DECK_COMMENTS = '{args.slug}'", index, count=1)
+    index = re.sub(r"window\.DECK_MINUTES = \d+", f"window.DECK_MINUTES = {int(minutes)}", index, count=1)
+    (talk / "index.html").write_text(index, encoding="utf-8")
+    if not args.example:
+        t01 = talk / "slides" / "01_title.js"
+        t01.write_text(t01.read_text(encoding="utf-8").replace("The title states your claim", html.escape(title)), encoding="utf-8")
+    (talk / ".gitignore").write_text(TALK_GITIGNORE, encoding="utf-8")
+    p.dir.mkdir(parents=True, exist_ok=True)
+    p.cfg = {"slug": args.slug, "title": title, "talk_dir": str(talk), "deck": args.slug, "minutes": int(minutes),
+             "created": now_iso(), "example": args.example}
+    p.save()
+    from_template("NOTES.template.md", p.path("NOTES.md"), title=title, slug=args.slug, talk=str(talk), minutes=str(minutes))
+    run_node("script.mjs", "export", "--deck", str(talk), "--force")
+    take_snapshot(p, by_default="template")
+    n = len(read_deck(p)["slides"])
+    print(f"new talk {args.slug}: {talk} ({n} slides, {minutes} minutes)\n"
+          f"  look at it:  pairtalk serve {args.slug}   (comment with c, script with s s, speaker view with v)\n"
+          f"  talk notes:  {p.path('NOTES.md')}")
+    return 0
+
+
+def cmd_shots(args) -> int:
+    p = Project(args.slug)
+    out = Path(args.out).expanduser().absolute() if args.out else p.path("shots")
+    if out.exists() and not args.out:
+        shutil.rmtree(out)
+    extra = []
+    for flag in ("ids", "click", "chrome", "width", "height"):
+        v = getattr(args, flag)
+        if v is not None:
+            extra += [f"--{flag}", str(v)]
+    if args.box:
+        x, y, w, h = (float(v) for v in args.box.split(","))
+        extra += ["--box", f"{x / 1920:.5f},{y / 1080:.5f},{w / 1920:.5f},{h / 1080:.5f}"] if max(x, y, w, h) > 1 else ["--box", args.box]
+    r = subprocess.run([node_bin(), str(TOOLS / "slide_shots.mjs"), "--deck", str(p.talk), "--out", str(out), *extra])
+    if r.returncode == 0:
+        print(f"screenshots: {out} (manifest.json lists every capture and any error)")
+    return 0 if r.returncode == 0 else EXIT_TOOL
+
+
+def cmd_bundle(args) -> int:
+    p = Project(args.slug)
+    out = Path(args.out).expanduser().absolute() if args.out else p.talk / "dist" / f"{p.slug}.html"
+    r = subprocess.run([node_bin(), str(TOOLS / "bundle.mjs"), "--deck", str(p.talk), "--out", str(out)])
+    return 0 if r.returncode == 0 else EXIT_TOOL
+
+
+# ------------------------------------------------------------------------------------------------- the shared site
+
+def cmd_remote(args) -> int:
+    p = Project(args.slug)
+    if args.off:
+        p.cfg.pop("remote", None)
+        p.save()
+        print(f"{p.slug}: no shared site")
+        return 0
+    r = dict(p.cfg.get("remote") or {})
+    if args.config:
+        cfg = Path(args.config).expanduser().absolute()
+        if not cfg.exists() or cfg.suffix != ".toml":
+            raise PtError(f"{cfg} is not a Wrangler TOML file")
+        if APP in cfg.parents and cfg.name != "wrangler.user.toml":
+            raise PtError("keep your own Wrangler config outside the PairTalk folder (or name it wrangler.user.toml, which git ignores)")
+        r["config"] = str(cfg)
+    if args.pages_project:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,57}", args.pages_project):
+            raise PtError("a Pages project name uses lowercase letters, digits and hyphens")
+        r["pages_project"] = args.pages_project
+    if args.database:
+        r["database"] = args.database
+    p.cfg["remote"] = r
+    p.save()
+    print(f"{p.slug}: shared site " + json.dumps(r))
+    return 0
+
+
+def stage_site(p: Project) -> Path:
+    st = stage_dir(p)
+    (st / "site").mkdir(parents=True, exist_ok=True)
+    for f in (st / "site").iterdir():
+        if f.name not in ("index.html", "_routes.json", "__version.txt"):
+            raise PtError(f"unexpected file in {st / 'site'}: {f.name}; move it aside")
+    r = subprocess.run([node_bin(), str(TOOLS / "bundle.mjs"), "--deck", str(p.talk), "--out", str(st / "site" / "index.html")])
+    if r.returncode != 0:
+        raise PtError("bundling the talk failed", EXIT_TOOL)
+    data = (st / "site" / "index.html").read_bytes()
+    write_json(st / "site" / "_routes.json", {"version": 1, "include": ["/*"], "exclude": []})
+    (st / "site" / "__version.txt").write_text("sha256-" + hashlib.sha256(data).hexdigest()[:24] + "\n")
+    if (st / "functions").exists():
+        shutil.rmtree(st / "functions")
+    shutil.copytree(CLOUDFLARE / "functions", st / "functions")
+    shutil.copy2(CLOUDFLARE / "schema.sql", st / "schema.sql")
+    remote = p.cfg.get("remote") or {}
+    toml = Path(remote["config"]).read_text(encoding="utf-8") if remote.get("config") else (CLOUDFLARE / "wrangler.toml").read_text(encoding="utf-8")
+    m = re.search(r"^\s*DECK\s*=\s*['\"]([^'\"]*)['\"]", toml, re.M)
+    if m and m.group(1) != p.deck:
+        raise PtError(f"your Wrangler config sets DECK = \"{m.group(1)}\", but this talk is \"{p.deck}\"")
+    if not m:
+        toml = re.sub(r"^\[vars\]\s*$", f'[vars]\nDECK = "{p.deck}"', toml, count=1, flags=re.M) if re.search(r"^\[vars\]\s*$", toml, re.M) \
+            else toml.rstrip() + f'\n\n[vars]\nDECK = "{p.deck}"\n'
+    (st / "wrangler.toml").write_text(toml, encoding="utf-8")
+    return st
+
+
+def cmd_publish(args) -> int:
+    p = Project(args.slug)
+    remote = p.cfg.get("remote") or {}
+    if not args.stage and not args.dev and not (remote.get("config") and remote.get("pages_project")):
+        raise PtError(f"set up the shared site first: `pairtalk remote {p.slug} --config ~/.pairtalk/wrangler.user.toml "
+                      "--pages-project your-pages-project` (skill/references/cloudflare.md)")
+    st = stage_site(p)
+    print(f"staged {p.slug} in {st} (site/index.html, functions/, wrangler.toml)")
+    if args.stage:
+        return 0
+    wr, env = wrangler_bin(), dict(os.environ, WRANGLER_SEND_METRICS="false")
+    db = remote.get("database", "pairtalk-comments")
+    if args.dev:
+        vars_ = st / ".dev.vars"
+        if not vars_.exists():
+            passcode = secrets.token_urlsafe(9)
+            vars_.write_text(f'PASSCODE="{passcode}"\nCOOKIE_SECRET="{secrets.token_hex(32)}"\n')
+            os.chmod(vars_, 0o600)
+        passcode = re.search(r'PASSCODE="([^"]*)"', vars_.read_text()).group(1)
+        subprocess.run([wr, "d1", "execute", db, "--local", "--config", str(st / "wrangler.toml"), "--persist-to",
+                        str(st / ".wrangler" / "state"), "--file", str(st / "schema.sql")], cwd=str(st), env=env, check=False)
+        print(f"local shared site on http://127.0.0.1:{args.port} · passcode {passcode} · `pairtalk watch {p.slug} --remote` reads it", flush=True)
+        return subprocess.run([wr, "pages", "dev", "site", "--d1", "COMMENTS_DB", "--ip", "127.0.0.1", "--port", str(args.port),
+                               "--persist-to", ".wrangler/state", "--binding", f"DECK={p.deck}"], cwd=str(st), env=env).returncode
+    if args.init_db:
+        r = subprocess.run([wr, "d1", "execute", db, "--remote", "--config", str(st / "wrangler.toml"), "--file", str(st / "schema.sql")],
+                           cwd=str(st), env=env)
+        if r.returncode != 0:
+            raise PtError("creating the tables failed", EXIT_REMOTE)
+    r = subprocess.run([wr, "pages", "deploy", "site", "--project-name", remote["pages_project"], "--branch",
+                        remote.get("branch", "main"), "--commit-dirty=true", "--commit-message", f"pairtalk: {p.slug}"],
+                       cwd=str(st), env=env)
+    return 0 if r.returncode == 0 else EXIT_REMOTE
+
+
+# ------------------------------------------------------------------------------------------------- seed
+
+SEED_VISUAL_KINDS = {".pptx", ".pdf", ".html", ".htm", ".key", ".md"}   # what shared/seed_visual.py reads
+
+
+def seed_visual_path() -> Path | None:
+    env = os.environ.get("PAIRTALK_SEED_VISUAL")
+    cand = Path(env) if env else SUITE / "shared" / "seed_visual.py"
+    return cand if cand.exists() else None
+
+
+def words(text: str) -> int:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    return len(re.findall(r"[A-Za-z0-9][\w'’-]*|[㐀-鿿]", text))
+
+
+A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+RNS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+PKG = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+def pptx_notes(path: Path) -> list:
+    """Speaker notes of a .pptx, one string per slide in presentation order (standard library only)."""
+    out = []
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+
+        def rels(part: str) -> dict:
+            d, base = part.rsplit("/", 1)
+            rp = f"{d}/_rels/{base}.rels"
+            if rp not in names:
+                return {}
+            res = {}
+            for r in ET.fromstring(z.read(rp)).iter(PKG + "Relationship"):
+                target = r.get("Target", "")
+                full = os.path.normpath(target.lstrip("/") if target.startswith("/") else f"{d}/{target}").replace("\\", "/")
+                res[r.get("Id")] = (r.get("Type", ""), full)
+            return res
+
+        pres = ET.fromstring(z.read("ppt/presentation.xml"))
+        prel = rels("ppt/presentation.xml")
+        for sid in pres.iter(P + "sldId"):
+            slide = prel.get(sid.get(RNS + "id"), ("", ""))[1]
+            note = next((t for typ, t in rels(slide).values() if typ.endswith("/notesSlide")), None)
+            text = ""
+            if note and note in names:
+                paras = []
+                for sp in ET.fromstring(z.read(note)).iter(P + "sp"):
+                    ph = sp.find(f".//{P}nvPr/{P}ph")
+                    if ph is not None and ph.get("type") in ("sldImg", "sldNum", "hdr", "ftr", "dt"):
+                        continue
+                    for para in sp.iter(A + "p"):
+                        s = "".join(t.text or "" for t in para.iter(A + "t")).strip()
+                        if s:
+                            paras.append(s)
+                text = "\n".join(paras)
+            out.append(text)
+    return out
+
+
+def script_notes(path: Path) -> list:
+    """A speaker script: PairTalk's SCRIPT.md (one entry per slide), else a Markdown or text file split at headings."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    blocks = list(NOTE_RE.finditer(text))
+    if blocks:
+        per = {}
+        for m in blocks:
+            sid = json.loads(m.group(1))["sid"]
+            per.setdefault(sid, []).append(m.group(2).strip())
+        return ["\n".join(v) for v in per.values()]
+    parts = [x.strip() for x in re.split(r"^#{1,3} .*$", text, flags=re.M)]
+    parts = [x for x in parts if x]
+    return parts or [text.strip()]
+
+
+def talk_extract(path: Path, minutes: float | None) -> dict:
+    suffix = path.suffix.lower()
+    info = {"file": path.name, "format": suffix.lstrip(".") or "folder"}
+    notes = []
+    if path.is_dir() and (path / "slides" / "order.js").exists():
+        deck = json.loads(run_node("script.mjs", "notes", "--deck", str(path)))
+        notes = ["\n".join(s["notes"]) for s in deck["slides"] if not s.get("backup")]
+        info["format"] = "pairtalk deck"
+    elif suffix == ".pptx":
+        notes = pptx_notes(path)
+    elif suffix in (".md", ".txt", ".markdown"):
+        notes = script_notes(path)
+    elif suffix in (".pdf", ".html", ".htm", ".key"):
+        info["note"] = "no speaker notes in this format; seeded for its look only"
+        return info
+    wc = [words(n) for n in notes]
+    total = sum(wc)
+    with_notes = [w for w in wc if w]
+    info.update(slides=len(notes), slides_with_notes=len(with_notes), total_words=total,
+                words_per_slide=round(total / len(with_notes), 1) if with_notes else 0,
+                longest_note=max(wc) if wc else 0)
+    if minutes:
+        info["minutes"] = minutes
+        info["words_per_minute"] = round(total / minutes) if total else 0
+        info["minutes_per_slide"] = round(minutes / len(notes), 2) if notes else 0
+    first = next((n for n in notes if n.strip()), "")
+    last = next((n for n in reversed(notes) if n.strip()), "")
+    info["opening"], info["closing"] = clip(re.sub(r"<[^>]+>", "", first), 900), clip(re.sub(r"<[^>]+>", "", last), 900)
+    info["samples"] = [clip(re.sub(r"<[^>]+>", "", n), 600) for n in notes[1:-1] if n.strip()][:6]
+    return info
+
+
+def seed_pages(talk: Path, pages: Path, limit: int = 12) -> int:
+    """Page images of a PairTalk folder: each slide at its last click, up to `limit`, evenly sampled (needs Chrome)."""
+    tmp = pages.parent / ".shots"
+    try:
+        r = subprocess.run([node_bin(), str(TOOLS / "slide_shots.mjs"), "--deck", str(talk), "--out", str(tmp), "--last",
+                            "--width", "1280", "--height", "720"], capture_output=True, text=True, timeout=900)
+        shots = sorted(tmp.glob("*.png")) if r.returncode == 0 else []
+        if not shots:
+            print(f"warning: no page images of {talk.name} (screenshots need Chrome and `npm install`)", file=sys.stderr)
+            return 0
+        step = max(1, -(-len(shots) // limit))
+        pages.mkdir(parents=True, exist_ok=True)
+        for n, f in enumerate(shots[::step][:limit], 1):
+            shutil.copy2(f, pages / f"{talk.name}-{n:02d}.png")
+        return min(limit, len(shots[::step]))
+    except (PtError, subprocess.TimeoutExpired):
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def collect_inputs(paths: list) -> list:
+    out = []
+    for raw in paths:
+        pth = Path(raw).expanduser().absolute()
+        if not pth.exists():
+            raise PtError(f"{pth} does not exist")
+        if pth.is_dir() and not (pth / "slides" / "order.js").exists():
+            for f in sorted(pth.rglob("*")):
+                if f.is_file() and not any(x.startswith(".") for x in f.relative_to(pth).parts) and \
+                        (f.suffix.lower() in (".pptx", ".pdf", ".key") or f.name.upper() == "SCRIPT.MD"):
+                    out.append(f)
+        else:
+            out.append(pth)
+    return out
+
+
+def cmd_seed(args) -> int:
+    if args.list:
+        rows = sorted(SEEDS.glob("*/seed.json")) if SEEDS.exists() else []
+        if not rows:
+            print("no seeds yet: `pairtalk seed <your past talks> --duration <minutes>`")
+        for f in rows:
+            m = read_json(f, {})
+            print(f"{m.get('id')} · {m.get('date', '')[:16]} · {len(m.get('files', []))} file(s): {', '.join(m.get('files', []))}"
+                  + (f" · {m['note']}" if m.get("note") else ""))
+        return 0
+    if args.forget:
+        d = SEEDS / args.forget
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{4}", args.forget) or not d.exists():
+            raise PtError(f"no seed {args.forget!r} (`pairtalk seed --list`)")
+        shutil.rmtree(d)
+        with FileLock(VAULT / ".evidence.lock"):
+            keep = [e for e in _evidence_rows() if not (e.get("kind") == "seed" and e.get("seed_id") == args.forget)]
+            gone = len(_evidence_rows()) - len(keep)
+            EVIDENCE.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep), encoding="utf-8")
+        print(f"forgot seed {args.forget} and its {gone} event(s); remove what it added to STYLE.md by hand")
+        return 0
+    if not args.paths:
+        raise PtError("name the past talks to learn from: slides (.pptx, .pdf, a PairTalk talk folder) and scripts (SCRIPT.md, .md, .txt)")
+    if not PROFILE_PATH.exists():
+        raise PtError("no profile yet: `pairtalk setup --name \"Your Name\"` first")
+    files = collect_inputs(args.paths)
+    if not files:
+        raise PtError("found no slides or scripts in those paths")
+    seed_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+    out = SEEDS / seed_id
+    out.mkdir(parents=True)
+    visual = [f for f in files if f.is_file() and f.suffix.lower() in SEED_VISUAL_KINDS]
+    sv, vis_manifest = seed_visual_path(), {}
+    if visual and sv:
+        r = subprocess.run([sys.executable, str(sv), *map(str, visual), "--out", str(out), "--kind", "talk", "--json"],
+                           capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0:
+            print(f"warning: the visual extraction failed ({clip((r.stderr or r.stdout).strip(), 300)}); the scripts are still seeded",
+                  file=sys.stderr)
+        else:
+            try:
+                vis_manifest = json.loads(r.stdout) if r.stdout.strip().startswith("{") else read_json(out / "manifest.json", {})
+            except ValueError:
+                vis_manifest = read_json(out / "manifest.json", {})
+    elif visual:
+        print(f"warning: no visual extractor ({SUITE / 'shared' / 'seed_visual.py'}); seeding the speaker notes only", file=sys.stderr)
+    for f in files:   # a PairTalk folder: its slides are drawn by the browser, so screenshot each slide's last click
+        if f.is_dir() and (f / "slides" / "order.js").exists():
+            seed_pages(f, out / "pages")
+    talks = [talk_extract(f, args.duration) for f in files]
+    write_json(out / "script.json", {"seed_id": seed_id, "duration_minutes": args.duration, "talks": talks})
+    stats = read_json(out / "stats.json", {})
+    with_words = [t for t in talks if t.get("total_words")]
+    stats["talk"] = {
+        "talks": len(talks), "talks_with_notes": len(with_words),
+        "words_per_slide": round(sum(t["words_per_slide"] for t in with_words) / len(with_words), 1) if with_words else None,
+        "words_per_minute": round(sum(t["words_per_minute"] for t in with_words if t.get("words_per_minute")) /
+                                  max(1, sum(1 for t in with_words if t.get("words_per_minute")))) if args.duration and with_words else None,
+        "per_talk": [{k: t.get(k) for k in ("file", "slides", "total_words", "words_per_slide", "minutes", "words_per_minute")} for t in talks]}
+    write_json(out / "stats.json", stats)
+    lines = [] if not (out / "samples.md").exists() else [(out / "samples.md").read_text(encoding="utf-8").rstrip(), ""]
+    lines += ["# Speaker scripts", ""]
+    for t in talks:
+        lines += [f"## {t['file']}", ""]
+        if t.get("note"):
+            lines += [t["note"], ""]
+            continue
+        lines += [f"{t.get('slides', 0)} slides, {t.get('total_words', 0)} spoken words, {t.get('words_per_slide', 0)} words per slide"
+                  + (f", {t['words_per_minute']} words per minute over {t['minutes']} minutes" if t.get("words_per_minute") else ""), ""]
+        if t.get("opening"):
+            lines += ["**How it opens:**", "", "> " + t["opening"].replace("\n", "\n> "), ""]
+        for s in t.get("samples", []):
+            lines += ["> " + s.replace("\n", "\n> "), ""]
+        if t.get("closing"):
+            lines += ["**How it closes:**", "", "> " + t["closing"].replace("\n", "\n> "), ""]
+    (out / "samples.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out / "pages").mkdir(exist_ok=True)
+    write_json(out / "seed.json", {"id": seed_id, "date": now_iso(), "files": [f.name for f in files], "note": args.note or "",
+                                   "duration_minutes": args.duration, "visual": bool(vis_manifest)})
+    events = []
+    for f, t in zip(files, talks):
+        st = {k: t[k] for k in ("slides", "total_words", "words_per_slide", "minutes", "words_per_minute") if t.get(k) is not None}
+        events.append({"kind": "seed", "project": None, "seed_id": seed_id, "file": f.name, "path": str(f), "format": t["format"],
+                       "stats": st, "note": args.note or ""})
+    ids = append_events(events)
+    pages = len(list((out / "pages").glob("*.png")))
+    print(f"seed {seed_id}: {len(files)} file(s), {len(ids)} event(s) ({ids[0]}…{ids[-1]}) · {pages} page image(s) · {out}")
+    for t in talks:
+        bits = [f"{t['slides']} slides" if t.get("slides") else "", f"{t['words_per_slide']} words/slide" if t.get("words_per_slide") else "",
+                f"{t['words_per_minute']} words/min" if t.get("words_per_minute") else "", t.get("note", "")]
+        print(f"  {t['file']}: " + ", ".join(b for b in bits if b))
+    print("Next: read samples.md, stats.json and pages/, draft STYLE.md entries (skill/references/seeding.md), then "
+          f"`pairtalk learn --all --ack {' '.join(ids)}`.")
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------- learn, status
+
+def cmd_learn(args) -> int:
+    if args.discard or args.ack:
+        ids = {x.strip() for a in (args.discard or args.ack) for x in a.split(",") if x.strip()}
+        if args.discard:
+            if not args.why.strip():
+                raise PtError("say why with --why: discarded evidence keeps the reason")
+            n = mark_events(ids, "discarded", {"why": args.why.strip(), "date": now_iso()})
+            print(f"discarded {n} event(s)")
+        else:
+            n = mark_events(ids, "acked", {"date": now_iso()})
+            print(f"acknowledged {n} event(s)")
+        missing = len(ids) - n
+        if missing:
+            print(f"warning: {missing} id(s) not found in {EVIDENCE}")
+        return 0
+    if not args.all and not args.slug:
+        raise PtError("name a talk, or pass --all (seeds have no talk)")
+    if args.slug and not args.all:
+        Project(args.slug)
+    events = pending_events(args.slug, every=args.all)
+    if not events:
+        print("no talk-style evidence waiting")
+        return 0
+    if args.json:
+        print(json.dumps(events, indent=1, ensure_ascii=False))
+        return 0
+    for e in events:
+        print(f"### {e['id']} · {e['kind']} · {e.get('project') or 'seed'} · {e.get('where') or e.get('file', '')}")
+        if e["kind"] == "seed":
+            print(f"File: {e.get('path')} · stats: {json.dumps(e.get('stats', {}))}" + (f" · note: {e['note']}" if e.get("note") else ""))
+            print(f"Read: {SEEDS / e.get('seed_id', '')}/samples.md, stats.json, pages/")
+        elif e["kind"] == "stated":
+            print(f"The owner said: {e.get('text')}" + (f"\nIn the comment: {e['comment']}" if e.get("comment") else ""))
+        else:
+            if e.get("target") == "slide":
+                print(e.get("diff", ""))
+            else:
+                print(f"Before ({'the agent' if e['kind'] != 'own_edit' else 'earlier'}): {e.get('before', '')}")
+                print(f"After (the owner): {e.get('after', '')}")
+                print(f"Change: {e.get('diff', '')}")
+        print()
+    print(f"Distil these into {STYLE_MD}, then: pairtalk learn --ack " + " ".join(e["id"] for e in events))
+    return 0
+
+
+def talk_counts(p: Project) -> dict:
+    comments, edits = inbox_load(p)
+    return {"open": sum(1 for c in comments if c.get("status") == "open"),
+            "edits": sum(1 for e in edits if e.get("status") == "open")}
+
+
+def cmd_status(args) -> int:
+    if not args.slug:
+        print(f"PairTalk {VERSION} · data home {DATA}" + ("" if PROFILE_PATH.exists() else " (no profile: `pairtalk setup`)"))
+        if PROFILE:
+            print(f"  owner: {PROFILE.get('name')} · agent {PROFILE.get('agent', 'Claude')}")
+        print(f"  talk style: {style_summary()}")
+        look = pairdeck_style()
+        print(f"  visual look: {style_summary(look) if look.exists() else 'none (PairDeck not set up)'}")
+        print(f"  evidence waiting: {len(pending_events(every=True))}")
+        talks = sorted(d.name for d in PROJECTS.iterdir() if (d / "project.json").exists()) if PROJECTS.exists() else []
+        for slug in talks:
+            p = Project(slug)
+            c = talk_counts(p)
+            print(f"  {slug}: {p.cfg.get('title', '')} · {p.talk} · {c['open']} open comment(s), {c['edits']} script edit(s)"
+                  + (" · watcher running" if lock_owner(p) else ""))
+        if not talks:
+            print("  no talks yet: `pairtalk new <name> --title \"…\"`")
+        return 0
+    p = Project(args.slug)
+    c, owner, b = talk_counts(p), lock_owner(p), load_baseline(p)
+    print(f"{p.slug}: {p.cfg.get('title', '')} ({p.cfg.get('minutes', '?')} minutes)")
+    print(f"  talk folder: {p.talk}" + ("" if p.talk.exists() else " (missing)"))
+    print(f"  watcher: " + (f"running, pid {owner['pid']} since {owner['started']}" if owner else "not running"))
+    print(f"  review server inbox: {c['open']} open comment(s), {c['edits']} open script edit(s) · {p.inbox}")
+    r = p.cfg.get("remote")
+    print(f"  shared site: " + (f"{r.get('pages_project', '(local dev)')} · config {r.get('config', '-')}" if r else "none"))
+    print(f"  snapshot: {b.get('taken', 'none')}" + (" · a batch is open (snapshot after fixing it)" if b.get("batch_open") else ""))
+    print(f"  evidence waiting: {len(pending_events(p.slug))}")
+    print(f"  talk style: {style_summary()}")
+    look = pairdeck_style()
+    print(f"  visual look: {style_summary(look) if look.exists() else 'none'}")
+    print(f"  talk notes: {p.path('NOTES.md')}")
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------- setup, paths
+
+HOME_GITIGNORE = """# PairTalk data home: the vault and each talk's settings are tracked; working state stays local
+projects/*/inbox/
+projects/*/state.json
+projects/*/baseline.json
+projects/*/watch.lock
+projects/*/batches/
+projects/*/shots/
+projects/*/attachments/
+projects/*/archive/
+projects/*/site-build/
+projects/*/*.tmp
+vault/.evidence.lock
+vault/.evidence-next.json
+vault/*.tmp
+wrangler.user.toml
+.DS_Store
+"""
+
+
+def global_git(key: str) -> str:
+    r = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def from_template(template: str, dest: Path, **subs: str) -> None:
+    if dest.exists():
+        return
+    tpl = TEMPLATES / template
+    text = tpl.read_text(encoding="utf-8") if tpl.exists() else ""
+    for k, v in subs.items():
+        text = text.replace("{" + k + "}", v)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+
+
+def cmd_setup(args) -> int:
+    home = Path(os.environ["PAIRTALK_HOME"]).expanduser() if os.environ.get("PAIRTALK_HOME") else \
+        Path(args.home).expanduser().absolute() if args.home else DEFAULT_HOME
+    if home.resolve() == APP or APP in home.resolve().parents:
+        raise PtError(f"keep the data home outside the code folder {APP}: pass --home DIR")
+    if not os.environ.get("PAIRTALK_HOME") and home != DEFAULT_HOME:
+        if DEFAULT_HOME.exists() or DEFAULT_HOME.is_symlink():
+            if DEFAULT_HOME.resolve() != home.resolve():
+                raise PtError(f"{DEFAULT_HOME} already exists and points to {DEFAULT_HOME.resolve()}")
+        else:
+            home.mkdir(parents=True, exist_ok=True)
+            DEFAULT_HOME.symlink_to(home)
+    home.mkdir(parents=True, exist_ok=True)
+    prof_path = home / "profile.json"
+    prof = json.loads(prof_path.read_text(encoding="utf-8")) if prof_path.exists() else {}
+    name = args.name or prof.get("name") or global_git("user.name")
+    if not name:
+        raise PtError("give your name as coauthors see it on comments: --name \"Ada Lovelace\"")
+    handle = args.handle or prof.get("handle") or name.split()[0]
+    prof.update(name=name, handle=handle)
+    prof["email"] = args.email or prof.get("email") or global_git("user.email")
+    if args.agent:
+        prof["agent"] = args.agent
+    prof.setdefault("agent", "Claude")
+    prof.setdefault("aliases", [])
+    prof_path.write_text(json.dumps(prof, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    vault = home / "vault"
+    (vault / "seed").mkdir(parents=True, exist_ok=True)
+    (home / "projects").mkdir(exist_ok=True)
+    from_template("STYLE.template.md", vault / "STYLE.md", name=name, handle=handle)
+    from_template("preferences.template.md", vault / "preferences.md", name=name, handle=handle)
+    (vault / "evidence.jsonl").touch()
+    if not args.no_git and not (home / ".git").exists():
+        (home / ".gitignore").write_text(HOME_GITIGNORE, encoding="utf-8")
+        subprocess.run(["git", "init", "--quiet"], cwd=home, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=home, check=True)
+        ident = ["-c", f"user.name={name}", "-c", f"user.email={prof['email'] or 'pairtalk@localhost'}"]
+        subprocess.run(["git", *ident, "commit", "--quiet", "-m", "PairTalk data home"], cwd=home, check=False)
+    print(f"profile: {prof_path}\n  {name} (handle {handle}), agent {prof['agent']}\n"
+          f"talk style: {vault / 'STYLE.md'}\ntalks: {home / 'projects'}\n"
+          f"Next: pairtalk new <name> --title \"…\"   (or --example pagerank to try the demo talk)")
+    return 0
+
+
+def cmd_paths(args) -> int:
+    rows = [("code", f"{APP} (pairtalk {VERSION})"),
+            ("data home", str(DATA)),
+            ("profile", f"{PROFILE_PATH}" + ("" if PROFILE_PATH.exists() else " (none yet: `pairtalk setup`)")),
+            ("talk style", str(STYLE_MD)), ("evidence", str(EVIDENCE)), ("seeds", str(SEEDS)),
+            ("preferences", str(VAULT / "preferences.md")), ("visual look", str(pairdeck_style())),
+            ("playbook", str(APP / "skill" / "references" / "playbook.md")),
+            ("talks", f"{PROJECTS}" + (": " + ", ".join(sorted(d.name for d in PROJECTS.iterdir() if (d / "project.json").exists()))
+                                       if PROJECTS.exists() else ""))]
+    if args.json:
+        print(json.dumps(dict(rows), indent=1))
+    else:
+        for k, v in rows:
+            print(f"{k:>12}  {v}")
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------- main
+
+def main(argv: list | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="pairtalk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"pairtalk {VERSION}")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", help="create your profile and data home (the style vault and your talks)")
+    s.add_argument("--name", help="your name as coauthors see it on comments")
+    s.add_argument("--handle", help="a short name (default: your first name)")
+    s.add_argument("--email")
+    s.add_argument("--agent", help="the agent's name in reports (default Claude)")
+    s.add_argument("--home", help="data home (default ~/.pairtalk; another folder gets a symlink there)")
+    s.add_argument("--no-git", action="store_true", help="do not make the data home a git repository")
+    s.set_defaults(fn=cmd_setup)
+
+    s = sub.add_parser("paths", help="where the code, profile, style vault and talks are")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_paths)
+
+    s = sub.add_parser("status", help="the data home and every talk, or one talk in detail")
+    s.add_argument("slug", nargs="?")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("new", help="a new talk from the template (or an example), registered in the data home")
+    s.add_argument("slug")
+    s.add_argument("--title")
+    s.add_argument("--dir", help="the talk folder (default ./<name>)")
+    s.add_argument("--minutes", type=int, help="the slot in minutes (default 15)")
+    s.add_argument("--example", help="start from an example talk, e.g. pagerank")
+    s.set_defaults(fn=cmd_new)
+
+    s = sub.add_parser("serve", help="show the talk on this computer, with the comment panel and script editing")
+    s.add_argument("slug")
+    s.add_argument("--port", type=int, default=8790)
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--allow-lan", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--open", action="store_true", help="open it in the browser")
+    s.set_defaults(fn=cmd_serve)
+
+    s = sub.add_parser("shots", help="screenshot every slide and click (an installed Chrome)")
+    s.add_argument("slug")
+    s.add_argument("--ids", help="slide ids, comma separated")
+    s.add_argument("--click", type=int)
+    s.add_argument("--box", help="x,y,w,h on the 1920x1080 slide: draw a comment's box")
+    s.add_argument("--out", help="folder (default: the talk's shots/ in the data home)")
+    s.add_argument("--chrome")
+    s.add_argument("--width", type=int)
+    s.add_argument("--height", type=int)
+    s.set_defaults(fn=cmd_shots)
+
+    s = sub.add_parser("bundle", help="one offline HTML file of the talk")
+    s.add_argument("slug")
+    s.add_argument("--out")
+    s.set_defaults(fn=cmd_bundle)
+
+    s = sub.add_parser("script", help="export the speaker notes to SCRIPT.md, or apply SCRIPT.md and the browser's edits")
+    s.add_argument("action", choices=["export", "apply"])
+    s.add_argument("slug")
+    s.add_argument("--force", action="store_true", help="export: replace SCRIPT.md (save pending edits first)")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--remote", action="store_true", help="apply: the shared site's edits")
+    s.add_argument("--only", nargs="*", help="apply: only these browser edit ids")
+    s.set_defaults(fn=cmd_script)
+
+    s = sub.add_parser("snapshot", help="record the talk as the agent made it (later edits are compared with it)")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_snapshot)
+
+    s = sub.add_parser("watch", help="wait for the next settled batch of comments and edits, print it, exit")
+    s.add_argument("slug")
+    s.add_argument("--remote", action="store_true", help="the shared site instead of the review server's inbox")
+    s.add_argument("--once", action="store_true", help="check once; exit 1 if nothing is new")
+    s.add_argument("--takeover", action="store_true", help="stop another watcher of this talk and watch here")
+    s.add_argument("--interval", type=float, help="seconds between checks (default 2, or 20 with --remote)")
+    s.add_argument("--settle", type=float, help="seconds the feedback must stay unchanged before the batch (default 10)")
+    s.add_argument("--quiet", type=float, help="seconds since a browser script edit was last saved (default 20)")
+    s.add_argument("--force", action="store_true", help="take unrecorded slide changes as the owner's")
+    s.add_argument("--max-failures", type=int, default=12)
+    s.add_argument("--max-hours", type=float, default=0)
+    s.set_defaults(fn=cmd_watch)
+
+    s = sub.add_parser("resolve", help="answer one comment (the reply shows under it)")
+    s.add_argument("slug")
+    s.add_argument("cid")
+    s.add_argument("reply", nargs="?")
+    s.add_argument("--reply-file")
+    s.add_argument("--remote", action="store_true")
+    s.add_argument("--stated", help="the general preference this owner's comment states, in their words (stated evidence)")
+    s.set_defaults(fn=cmd_resolve)
+
+    s = sub.add_parser("learn", help="show talk-style evidence waiting to be learned, or acknowledge or discard it")
+    s.add_argument("slug", nargs="?")
+    s.add_argument("--all", action="store_true", help="every talk and every seed")
+    s.add_argument("--ack", nargs="*")
+    s.add_argument("--discard", nargs="*", help="evidence that is not the owner's: flag it and drop it")
+    s.add_argument("--why", default="")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_learn)
+
+    s = sub.add_parser("seed", help="learn from your past talks: slides, speaker notes, scripts")
+    s.add_argument("paths", nargs="*")
+    s.add_argument("--note", help="what these talks are (kept with the seed)")
+    s.add_argument("--duration", type=float, help="each talk's length in minutes (gives words per minute)")
+    s.add_argument("--list", action="store_true")
+    s.add_argument("--forget", metavar="SEED_ID")
+    s.set_defaults(fn=cmd_seed)
+
+    s = sub.add_parser("remote", help="point a talk at your own shared site (Cloudflare Pages + D1)")
+    s.add_argument("slug")
+    s.add_argument("--config", help="your own Wrangler TOML (Pages project name, D1 database_id)")
+    s.add_argument("--pages-project")
+    s.add_argument("--database", help="D1 database name (default pairtalk-comments)")
+    s.add_argument("--off", action="store_true")
+    s.set_defaults(fn=cmd_remote)
+
+    s = sub.add_parser("publish", help="bundle the talk and deploy it to the shared site")
+    s.add_argument("slug")
+    s.add_argument("--stage", action="store_true", help="only build the site folder")
+    s.add_argument("--dev", action="store_true", help="run the shared site on this computer (local D1)")
+    s.add_argument("--port", type=int, default=8788)
+    s.add_argument("--init-db", action="store_true", help="create the tables in the remote database first")
+    s.set_defaults(fn=cmd_publish)
+
+    args = ap.parse_args(argv)
+    try:
+        return args.fn(args)
+    except PtError as exc:
+        print(f"pairtalk: {exc}", file=sys.stderr)
+        return exc.code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

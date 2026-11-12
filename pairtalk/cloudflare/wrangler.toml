@@ -1,0 +1,11 @@
+# Derived from html-slide by Yanwei Sun (https://github.com/Yanwei-Sun/html-slide); see NOTICE.md.
+# The shared review site's Wrangler config. Keep this generic copy without ids: `pairtalk remote` points a talk at your
+# own copy (for example ~/.pairtalk/wrangler.user.toml) that holds your Pages project name and your D1 database_id.
+name = "your-pages-project"
+pages_build_output_dir = "./site"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "COMMENTS_DB"
+database_name = "pairtalk-comments"
+# database_id = "..."   (only in your own copy)

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 414" width="960" height="414" role="img" aria-label="The PairDeck loop: you drag a box on a slide and comment, the agent edits the deck and replies under your comment, and what you keep, rewrite or undo teaches your style guide">
+<style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#232323} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6B6B6B"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#C6952C"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#6D5398"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#27709C"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#227828"/></marker></defs>
+<circle cx="22" cy="14" r="11" fill="#C6952C"/><text x="22" y="19.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">1</text>
+<text x="40" y="20" font-size="17" class="b" style="fill:#27709C">You comment on a slide</text>
+<circle cx="352" cy="14" r="11" fill="#C6952C"/><text x="352" y="19.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">2</text>
+<text x="370" y="20" font-size="17" class="b" style="fill:#6D5398">The agent answers</text>
+<circle cx="668" cy="14" r="11" fill="#C6952C"/><text x="668" y="19.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">3</text>
+<text x="686" y="20" font-size="17" class="b">The deck updates</text>
+<rect x="10" y="34" width="292" height="250" rx="8" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="1.6"/><path d="M10,42 a8,8 0 0 1 8,-8 h276 a8,8 0 0 1 8,8 v22 h-292 Z" fill="#F1F1EE"/><circle cx="27" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="42" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="57" cy="49" r="4.5" fill="#D9D9D9"/><rect x="72" y="40" width="218" height="18" rx="9" fill="#FFFFFF"/><text x="84" y="54" font-size="13" class="m" style="fill:#6B6B6B">review page</text>
+<rect x="28" y="78" width="150" height="8" rx="4" fill="#E4E4E1"/>
+<path d="M50,98 V152" stroke="#BDBDBD" stroke-width="1.4"/><rect x="50" y="104" width="118" height="16" rx="2" fill="#27709C" opacity=".85"/><rect x="50" y="130" width="104" height="16" rx="2" fill="#3F8A7E" opacity=".85"/>
+<rect x="40" y="94" width="186" height="64" rx="5" fill="#EAF2F8" fill-opacity=".55" stroke="#27709C" stroke-width="1.8" stroke-dasharray="6 4"/>
+<rect x="28" y="178" width="256" height="92" rx="7" fill="#FFFFFF" stroke="#27709C" stroke-width="1.6"/>
+<text x="40" y="200" font-size="15" style="fill:#27709C"><tspan class="b">Ada:</tspan> label each bar;</text>
+<text x="40" y="220" font-size="15" style="fill:#27709C">drop the legend, it makes</text>
+<text x="40" y="240" font-size="15" style="fill:#27709C">me look back and forth</text>
+<rect x="222" y="244" width="50" height="20" rx="10" fill="#27709C"/><text x="247" y="258" font-size="13" class="b" text-anchor="middle" style="fill:#FFFFFF">Send</text>
+<path d="M306,159 L334,159" stroke="#6B6B6B" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<rect x="340" y="70" width="290" height="178" rx="8" fill="#F3EEF8" stroke="#6D5398" stroke-width="1.8"/>
+<text x="485" y="99" font-size="17.5" class="b" text-anchor="middle" style="fill:#6D5398">Your agent + pairdeck</text>
+<text x="485" y="119" font-size="14.5" text-anchor="middle" style="fill:#6B6B6B">(Claude Code, Codex, …)</text>
+<circle cx="358" cy="146" r="3.5" fill="#6D5398"/><text x="370" y="151" font-size="15">picks up the comment and box</text>
+<circle cx="358" cy="171" r="3.5" fill="#6D5398"/><text x="370" y="176" font-size="15">reads the slide and your style</text>
+<circle cx="358" cy="196" r="3.5" fill="#6D5398"/><text x="370" y="201" font-size="15">edits the deck, screenshots it</text>
+<circle cx="358" cy="221" r="3.5" fill="#6D5398"/><text x="370" y="226" font-size="15">replies under your comment</text>
+<path d="M634,159 L660,159" stroke="#6B6B6B" stroke-width="2" fill="none" marker-end="url(#a)"/>
+<rect x="664" y="34" width="288" height="250" rx="8" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="1.6"/><path d="M664,42 a8,8 0 0 1 8,-8 h272 a8,8 0 0 1 8,8 v22 h-288 Z" fill="#F1F1EE"/><circle cx="681" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="696" cy="49" r="4.5" fill="#D9D9D9"/><circle cx="711" cy="49" r="4.5" fill="#D9D9D9"/><rect x="726" y="40" width="214" height="18" rx="9" fill="#FFFFFF"/><text x="738" y="54" font-size="13" class="m" style="fill:#6B6B6B">review page</text>
+<rect x="682" y="78" width="150" height="8" rx="4" fill="#E4E4E1"/>
+<text x="696" y="117" font-size="15" text-anchor="end" style="fill:#27709C">A</text><text x="696" y="143" font-size="15" text-anchor="end" style="fill:#3F8A7E">B</text>
+<path d="M704,98 V152" stroke="#BDBDBD" stroke-width="1.4"/><rect x="704" y="104" width="118" height="16" rx="2" fill="#27709C" opacity=".85"/><rect x="704" y="130" width="104" height="16" rx="2" fill="#3F8A7E" opacity=".85"/><text x="828" y="117" font-size="14" style="fill:#27709C">93%</text><text x="814" y="143" font-size="14" style="fill:#3F8A7E">87%</text>
+<rect x="680" y="178" width="256" height="92" rx="7" fill="#EDF5EC"/><rect x="680" y="178" width="3" height="92" fill="#227828"/>
+<text x="692" y="200" font-size="15" style="fill:#227828"><tspan class="b">Claude:</tspan> labelled each</text>
+<text x="692" y="220" font-size="15" style="fill:#227828">bar at its end; legend gone,</text>
+<text x="692" y="240" font-size="15" style="fill:#227828">on slides 3, 4 and 7.</text>
+<rect x="868" y="244" width="56" height="20" rx="10" fill="none" stroke="#227828" stroke-width="1.4"/><text x="896" y="258" font-size="13" class="b" text-anchor="middle" style="fill:#227828">Keep</text>
+<rect x="340" y="318" width="290" height="64" rx="8" fill="#FBF6E9" stroke="#C6952C" stroke-width="1.8"/>
+<circle cx="360" cy="337" r="11" fill="#C6952C"/><text x="360" y="342.2" font-size="15" class="b" text-anchor="middle" fill="#FFFFFF" style="fill:#FFFFFF">4</text>
+<text x="378" y="343" font-size="17.5" class="b" style="fill:#8A6410">Your style guide</text>
+<text x="360" y="368" font-size="14.5">STYLE.md: plain text, in git</text>
+<path d="M808,288 C808,340 724,350 634,350" stroke="#C6952C" stroke-width="2.4" fill="none" marker-end="url(#ag)"/>
+<path d="M156,288 C156,340 240,350 336,350" stroke="#C6952C" stroke-width="2.4" fill="none" marker-end="url(#ag)"/>
+<path d="M485,316 L485,252" stroke="#6D5398" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#ap)"/>
+<text x="476" y="290" font-size="14.5" text-anchor="end" style="fill:#6D5398">read before every deck</text>
+<text x="950" y="381" font-size="14.5" text-anchor="end" style="fill:#8A6410">what you keep, rewrite or undo</text>
+<text x="12" y="381" font-size="14.5" style="fill:#8A6410">and the decks you made before</text>
+<text x="950" y="406" font-size="14.5" text-anchor="end" style="fill:#6B6B6B">Accept: Keep. Not quite: Follow up, or edit the slide yourself.</text>
+</svg>
