@@ -3,7 +3,7 @@
 PairLab's releases. Each tool keeps its own detailed changelog: [PairDeck](pairdeck/CHANGELOG.md),
 [PairTeX](pairtex/CHANGELOG.md), [PairTalk](pairtalk/CHANGELOG.md).
 
-## Unreleased
+## 0.2.0 (2026-11-14)
 
 - **PairPoster 0.1.0** (new): conference posters as one HTML page at the venue's size, built picture-first (icon chains,
   charts, big numbers, formula boxes) with word budgets per block; `qa` measures overflow, type size at print scale, words
@@ -12,6 +12,8 @@ PairLab's releases. Each tool keeps its own detailed changelog: [PairDeck](paird
 - **PairDeck 0.1.1**: the same program now also runs as PairPoster; the review overlay takes its wording and anchors from
   the tool and records the labelled block a comment points at.
 - `./install.sh` installs all four tools.
+- `pairposter/tools/figdata.py` recovers a matplotlib figure's data from its vector PDF; posters default to Nunito; an
+  example poster (`pairposter/examples/simpsons-paradox`); the README tells the suite as four moments, with five tabs.
 
 ## 0.1.0 (2026-11-12)
 

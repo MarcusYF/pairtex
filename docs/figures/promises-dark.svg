@@ -1,28 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 228" width="960" height="228" role="img" aria-label="What the three tools share: they learn your style; you stay in flow while the agent works in the background; each starts from your own past work and runs on your own agent plan">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 276" width="960" height="276" role="img" aria-label="Two ideas behind every PairLab tool: work with your agent interactively, where the work is; and it adapts to your style, learning from every edit you keep, rewrite or undo">
 <style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#E6EDF3} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
 <defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#9198A1"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#D4A33A"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#B39DDB"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5AA8DA"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5DBB63"/></marker></defs>
-<rect x="10" y="6" width="300" height="214" rx="10" fill="#261E0F" stroke="#D4A33A" stroke-width="1.8"/>
+<rect x="10" y="6" width="460" height="262" rx="10" fill="#0F2536" stroke="#5AA8DA" stroke-width="1.8"/>
 <circle cx="36" cy="36" r="11" fill="#D4A33A"/><text x="36" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">1</text>
-<text x="56" y="42" font-size="19" class="b" style="fill:#E3B95A">It learns you</text>
-<text x="32" y="78" font-size="16">A style guide per tool, in plain</text>
-<text x="32" y="104" font-size="16">text, in git, in your home folder.</text>
-<text x="32" y="130" font-size="16">Every edit you keep, rewrite or</text>
-<text x="32" y="156" font-size="16">undo is evidence; three pieces</text>
-<text x="32" y="182" font-size="16">confirm a rule. Your edits win.</text>
-<rect x="330" y="6" width="300" height="214" rx="10" fill="#0F2536" stroke="#5AA8DA" stroke-width="1.8"/>
-<circle cx="356" cy="36" r="11" fill="#D4A33A"/><text x="356" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">2</text>
-<text x="376" y="42" font-size="19" class="b" style="fill:#5AA8DA">You stay in flow</text>
-<text x="352" y="78" font-size="16">Feedback goes where the work is:</text>
-<text x="352" y="104" font-size="16">the .tex source, the slide, the</text>
-<text x="352" y="130" font-size="16">script. Your agent picks it up in</text>
-<text x="352" y="156" font-size="16">the background, fixes it, replies</text>
-<text x="352" y="182" font-size="16">next to it and publishes.</text>
-<rect x="650" y="6" width="300" height="214" rx="10" fill="#231C33" stroke="#B39DDB" stroke-width="1.8"/>
-<circle cx="676" cy="36" r="11" fill="#D4A33A"/><text x="676" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">3</text>
-<text x="696" y="42" font-size="19" class="b" style="fill:#B39DDB">Starts from your work</text>
-<text x="672" y="78" font-size="16">Seed each guide from papers,</text>
-<text x="672" y="104" font-size="16">decks and talks you already made,</text>
-<text x="672" y="130" font-size="16">so the first draft sounds and</text>
-<text x="672" y="156" font-size="16">looks like you. It runs on your</text>
-<text x="672" y="182" font-size="16">Claude or ChatGPT plan: no API key.</text>
+<text x="56" y="42" font-size="20" class="b" style="fill:#5AA8DA">Work with your agent, interactively</text>
+<text x="32" y="80" font-size="16.5">You comment where the work is: the slide,</text>
+<text x="32" y="106" font-size="16.5">the LaTeX source, the talk, the poster.</text>
+<text x="32" y="132" font-size="16.5">Your agent picks it up in the background,</text>
+<text x="32" y="158" font-size="16.5">fixes it and replies next to your comment.</text>
+<text x="32" y="184" font-size="16.5">Keep it, follow up, or edit it yourself.</text>
+<rect x="32" y="222" width="106" height="30" rx="15" fill="#161B22" stroke="#5AA8DA" stroke-width="1.5"/>
+<text x="84.8" y="242" font-size="14" class="b" text-anchor="middle" style="fill:#5AA8DA">you comment</text>
+<path d="M141.6,237 L157.6,237" stroke="#9198A1" stroke-width="1.8" fill="none" marker-end="url(#a)"/>
+<rect x="163.6" y="222" width="174" height="30" rx="15" fill="#161B22" stroke="#B39DDB" stroke-width="1.5"/>
+<text x="250.6" y="242" font-size="14" class="b" text-anchor="middle" style="fill:#B39DDB">agent fixes, replies</text>
+<path d="M341.6,237 L357.6,237" stroke="#9198A1" stroke-width="1.8" fill="none" marker-end="url(#a)"/>
+<rect x="363.6" y="222" width="83" height="30" rx="15" fill="#161B22" stroke="#5AA8DA" stroke-width="1.5"/>
+<text x="405.0" y="242" font-size="14" class="b" text-anchor="middle" style="fill:#5AA8DA">you keep</text>
+<rect x="490" y="6" width="460" height="262" rx="10" fill="#261E0F" stroke="#D4A33A" stroke-width="1.8"/>
+<circle cx="516" cy="36" r="11" fill="#D4A33A"/><text x="516" y="41.2" font-size="15" class="b" text-anchor="middle" fill="#0D1117" style="fill:#0D1117">2</text>
+<text x="536" y="42" font-size="20" class="b" style="fill:#E3B95A">It adapts to your style</text>
+<text x="512" y="80" font-size="16.5">Every edit you keep, rewrite or undo, and</text>
+<text x="512" y="106" font-size="16.5">every “always” or “never”, is evidence.</text>
+<text x="512" y="132" font-size="16.5">It becomes a style guide of your voice,</text>
+<text x="512" y="158" font-size="16.5">visual taste and pacing, seeded from your</text>
+<text x="512" y="184" font-size="16.5">past work: plain text, yours to edit.</text>
+<rect x="512" y="222" width="98" height="30" rx="15" fill="#161B22" stroke="#E3B95A" stroke-width="1.5"/>
+<text x="561.0" y="242" font-size="14" class="b" text-anchor="middle" style="fill:#E3B95A">your edits</text>
+<path d="M614.0,237 L630.0,237" stroke="#9198A1" stroke-width="1.8" fill="none" marker-end="url(#a)"/>
+<rect x="636.0" y="222" width="83" height="30" rx="15" fill="#161B22" stroke="#E3B95A" stroke-width="1.5"/>
+<text x="677.4" y="242" font-size="14" class="b" text-anchor="middle" style="fill:#E3B95A">STYLE.md</text>
+<path d="M722.8,237 L738.8,237" stroke="#9198A1" stroke-width="1.8" fill="none" marker-end="url(#a)"/>
+<rect x="744.8" y="222" width="98" height="30" rx="15" fill="#161B22" stroke="#B39DDB" stroke-width="1.5"/>
+<text x="793.8" y="242" font-size="14" class="b" text-anchor="middle" style="fill:#B39DDB">next draft</text>
 </svg>

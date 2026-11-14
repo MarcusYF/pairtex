@@ -1,5 +1,5 @@
 <!-- TABBAR -->
-<p align="center"><a href="../README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-overview-off-dark.svg"><img src="../docs/figures/tab-overview-off.svg" width="200" alt="PairLab: the suite"></picture></a><a href="../pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairdeck-off-dark.svg"><img src="../docs/figures/tab-pairdeck-off.svg" width="200" alt="PairDeck: report"></picture></a><a href="../pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtex-off-dark.svg"><img src="../docs/figures/tab-pairtex-off.svg" width="200" alt="PairTeX: write"></picture></a><a href="../pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtalk-on-dark.svg"><img src="../docs/figures/tab-pairtalk-on.svg" width="200" alt="PairTalk: present"></picture></a></p>
+<p align="center"><a href="../README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-overview-off-dark.svg"><img src="../docs/figures/tab-overview-off.svg" width="176" alt="PairLab: the suite"></picture></a><a href="../pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairdeck-off-dark.svg"><img src="../docs/figures/tab-pairdeck-off.svg" width="176" alt="PairDeck: report"></picture></a><a href="../pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtex-off-dark.svg"><img src="../docs/figures/tab-pairtex-off.svg" width="176" alt="PairTeX: write"></picture></a><a href="../pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtalk-on-dark.svg"><img src="../docs/figures/tab-pairtalk-on.svg" width="176" alt="PairTalk: present"></picture></a><a href="../pairposter/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairposter-off-dark.svg"><img src="../docs/figures/tab-pairposter-off.svg" width="176" alt="PairPoster: pitch"></picture></a></p>
 <!-- /TABBAR -->
 
 <p align="center">
@@ -19,6 +19,9 @@
 You comment on any slide and click of your talk, drawing a box around the part you mean, or you rewrite a line of the speaker
 script. Your agent fixes the slide and the script in the background and replies under your comment, and every change you keep,
 rewrite or undo teaches it how you build and give talks, so its first drafts need fewer comments over time.
+
+- **Interactive.** Press `c` on any slide and click, draw a box and write, or edit the script; your agent fixes the slide and the script and replies under your comment.
+- **Adaptive.** Your talk-style guide (pacing, builds, phrasing) learns from your own comments and script rewrites, and can start from your past talks.
 
 PairTalk is built on [html-slide](https://github.com/Yanwei-Sun/html-slide) by Yanwei Sun: its slide engine, comment
 panel and shared review site started there ([NOTICE.md](NOTICE.md)).

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-14)
 
 The first version, as PairLab's fourth tool.
 - **Posters at print size.** `pairposter new <slug> --size WxH` scaffolds one HTML page at the venue's size (mm), with the
@@ -24,5 +24,7 @@ The first version, as PairLab's fourth tool.
   squeezed part; `.pp-spread` spreads a tall block's spare height.
 - **`tools/figdata.py`**: recovers the data of a matplotlib vector PDF (lines, error bands, axis mapping from the tick
   labels), so a paper's plot can be redrawn in the poster's style. Standard library only.
+- **Nunito** (SIL OFL) is the engine's default poster typeface; Computer Modern stays bundled (`--font-serif`).
+- **An example poster**, `examples/simpsons-paradox` (A0 landscape, the 1986 kidney-stone data), and README images.
 - SVG text keeps its own `fill` (the engine's default ink applies only to text without one).
 - `tests/test_e2e.py`: 31 checks (the measured checks, screenshots and printing need Chrome).

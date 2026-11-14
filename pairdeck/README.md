@@ -1,5 +1,5 @@
 <!-- TABBAR -->
-<p align="center"><a href="../README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-overview-off-dark.svg"><img src="../docs/figures/tab-overview-off.svg" width="200" alt="PairLab: the suite"></picture></a><a href="../pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairdeck-on-dark.svg"><img src="../docs/figures/tab-pairdeck-on.svg" width="200" alt="PairDeck: report"></picture></a><a href="../pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtex-off-dark.svg"><img src="../docs/figures/tab-pairtex-off.svg" width="200" alt="PairTeX: write"></picture></a><a href="../pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtalk-off-dark.svg"><img src="../docs/figures/tab-pairtalk-off.svg" width="200" alt="PairTalk: present"></picture></a></p>
+<p align="center"><a href="../README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-overview-off-dark.svg"><img src="../docs/figures/tab-overview-off.svg" width="176" alt="PairLab: the suite"></picture></a><a href="../pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairdeck-on-dark.svg"><img src="../docs/figures/tab-pairdeck-on.svg" width="176" alt="PairDeck: report"></picture></a><a href="../pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtex-off-dark.svg"><img src="../docs/figures/tab-pairtex-off.svg" width="176" alt="PairTeX: write"></picture></a><a href="../pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtalk-off-dark.svg"><img src="../docs/figures/tab-pairtalk-off.svg" width="176" alt="PairTalk: present"></picture></a><a href="../pairposter/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairposter-off-dark.svg"><img src="../docs/figures/tab-pairposter-off.svg" width="176" alt="PairPoster: pitch"></picture></a></p>
 <!-- /TABBAR -->
 
 <p align="center">
@@ -20,6 +20,9 @@ You give your agent the material (a paper, a project, the results of an investig
 explains it with pictures that build up step by step, checked slide by slide on screenshots. Then you drag a box over any
 slide in the local review page and type what should change: the agent fixes the deck in the background and replies under your
 comment, and every change you keep, rewrite or undo teaches it your visual style.
+
+- **Interactive.** Drag a box on any slide in the local review page and type; your agent fixes the deck in the background and replies under your comment.
+- **Adaptive.** Your visual style guide (palette, type, density, how a slide builds) grows from every change you keep, rewrite or undo, and can start from your past decks.
 
 <p align="center">
   <picture>

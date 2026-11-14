@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## 0.1.1 (2026-11-14)
 
 - **Runs PairPoster too.** `../pairposter/bin/pairposter` runs this program in its poster flavour (`PAIRLAB_FLAVOR=poster`):
   its own data home, template, engine, `qa` and `print`; the review page, watch, resolve, snapshot, learn and seed are shared.

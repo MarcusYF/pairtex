@@ -1,55 +1,68 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/figures/banner-dark.svg">
-    <img src="docs/figures/banner.svg" width="100%" alt="PairLab: research tools that learn your style: pair-explain, pair-write, pair-present.">
+    <img src="docs/figures/banner.svg" width="100%" alt="PairLab: work with your AI agent, interactively, in a style that adapts to yours.">
   </picture>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-27709C" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/tools-PairDeck%20%C2%B7%20PairTeX%20%C2%B7%20PairTalk-C6952C" alt="three tools: PairDeck, PairTeX, PairTalk">
+  <img src="https://img.shields.io/badge/tools-PairDeck%20%C2%B7%20PairTeX%20%C2%B7%20PairTalk%20%C2%B7%20PairPoster-C6952C" alt="four tools: PairDeck, PairTeX, PairTalk, PairPoster">
   <img src="https://img.shields.io/badge/runs%20in-Claude%20Code%20%C2%B7%20Codex-6D5398" alt="runs in Claude Code or Codex">
   <img src="https://img.shields.io/badge/no-API%20key-227828" alt="no API key">
 </p>
 
 <!-- TABBAR -->
-<p align="center"><a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-overview-on-dark.svg"><img src="docs/figures/tab-overview-on.svg" width="200" alt="PairLab: the suite"></picture></a><a href="pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairdeck-off-dark.svg"><img src="docs/figures/tab-pairdeck-off.svg" width="200" alt="PairDeck: report"></picture></a><a href="pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairtex-off-dark.svg"><img src="docs/figures/tab-pairtex-off.svg" width="200" alt="PairTeX: write"></picture></a><a href="pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairtalk-off-dark.svg"><img src="docs/figures/tab-pairtalk-off.svg" width="200" alt="PairTalk: present"></picture></a></p>
+<p align="center"><a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-overview-on-dark.svg"><img src="docs/figures/tab-overview-on.svg" width="176" alt="PairLab: the suite"></picture></a><a href="pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairdeck-off-dark.svg"><img src="docs/figures/tab-pairdeck-off.svg" width="176" alt="PairDeck: report"></picture></a><a href="pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairtex-off-dark.svg"><img src="docs/figures/tab-pairtex-off.svg" width="176" alt="PairTeX: write"></picture></a><a href="pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairtalk-off-dark.svg"><img src="docs/figures/tab-pairtalk-off.svg" width="176" alt="PairTalk: present"></picture></a><a href="pairposter/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/figures/tab-pairposter-off-dark.svg"><img src="docs/figures/tab-pairposter-off.svg" width="176" alt="PairPoster: pitch"></picture></a></p>
 <!-- /TABBAR -->
 
-Research has three moments when you make something for other people: after a brainstorm you report what you found, then you
-write the paper, then you give the talk. PairLab gives each moment an AI coauthor that works **where that thing lives**, in
-the background, and keeps **a style guide of you** that gets closer with every round. You give feedback the way you would to a
-colleague; the fix, and a short reply, land in the deck, the paper or the talk.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/workflow-dark.svg">
-    <img src="docs/figures/workflow.svg" width="100%" alt="Three moments of research, three tools. PairDeck reports what you found: you comment on a slide in your browser, and your agent delivers an animated HTML deck that explains one idea. PairTeX writes the paper: you write %! comments in your LaTeX source, and your agent edits the paper on Overleaf, git or a folder. PairTalk gives the talk: you and your coauthors comment on the talk site or edit the script, and your agent delivers a talk with builds and a speaker script. Under all three, your style vault, one per tool, seeded from your own papers, decks and talks, grows with every edit you keep, rewrite or undo, and is read before every piece of work. Your agent does the thinking: Claude Code, Codex, or any agent that runs shell commands, on your own plan.">
-  </picture>
-</p>
-
-## What the three tools share
+PairLab is four research tools built on two ideas. **You work with your AI agent interactively**, on the real thing: you
+comment on the slide, in the LaTeX source, on the talk or the poster, and the agent fixes it in the background and replies
+next to your comment. **It adapts to your style**: every edit you keep, rewrite or undo teaches it how you write, design and
+present, so each round needs fewer comments than the last.
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/figures/promises-dark.svg">
-    <img src="docs/figures/promises.svg" width="100%" alt="1. It learns you: a style guide per tool, in plain text, in git, in your home folder; every edit you keep, rewrite or undo is evidence; three pieces confirm a rule; your edits win. 2. You stay in flow: feedback goes where the work is (the .tex source, the slide, the script); your agent picks it up in the background, fixes it, replies next to it and publishes. 3. Starts from your work: seed each guide from papers, decks and talks you already made, so the first draft sounds and looks like you; it runs on your Claude or ChatGPT plan, with no API key.">
+    <img src="docs/figures/promises.svg" width="100%" alt="Two ideas behind every PairLab tool. 1. Work with your agent, interactively: you comment where the work is (the slide, the LaTeX source, the talk, the poster); your agent picks it up in the background, fixes it and replies next to your comment; you keep the change, follow up, or edit it yourself. 2. It adapts to your style: every edit you keep, rewrite or undo, and every always or never you say, is evidence; it becomes a style guide of your voice, visual taste and pacing, seeded from your past work, in plain text you can edit.">
   </picture>
 </p>
 
-1. **It learns you.** A chat window forgets your corrections. Each tool keeps a style guide, `STYLE.md`, with the evidence
-   behind every rule: your academic voice for papers, your visual taste for decks, your pacing and phrasing for talks. A
-   pattern becomes a rule after three independent pieces of evidence, or at once when you say "always" or "never".
-2. **You stay in flow.** No copying text into a chat and back. You comment in the LaTeX source, on the slide, or in the
-   script; a watcher wakes your agent, which fixes the work, answers next to your comment, publishes, and goes back to
-   waiting.
-3. **It starts from your own work and runs on your own plan.** `seed` reads papers, decks and talks you already made, so the
-   first draft is already close; your feedback refines it from there. The thinking happens in the coding agent you already
-   pay for: Claude Code or Codex. There is no PairLab server, model or API key.
+## Interactive: you and your agent, on the same work
 
-The three tools follow one contract for this memory: [docs/style-vault.md](docs/style-vault.md).
+- **Comment where the work is.** Drag a box on a slide or a poster, write `%! tighten this..` in your LaTeX source, or leave a
+  note on a talk's slide. No copying text into a chat window and back.
+- **Your agent answers in place.** A watcher wakes your agent when you comment; it fixes the work, checks it (screenshots,
+  print size, a LaTeX build), replies next to your comment, and waits for the next one. A round takes about a minute.
+- **You stay in charge.** Press **Keep**, **Follow up**, or edit the thing yourself: your own edits are read as yours and
+  kept. Coauthors can comment too; their comments are answered, not learned from.
+- **On the agent you already use.** Claude Code or Codex does the thinking, on your own plan. There is no PairLab server,
+  model or API key.
 
-## The tools
+## Adaptive: it learns your style
+
+- **Every edit is evidence.** What you keep, rewrite or undo, and every "always" or "never" you write, goes into a style
+  guide, `STYLE.md`, one per tool: your academic voice for papers, your visual taste for decks and posters, your pacing and
+  phrasing for talks.
+- **Rules, with their reasons.** A pattern becomes a rule after three independent pieces of evidence, or at once when you
+  state it; each rule lists the edits behind it, and the agent reads the guide before every piece of work.
+- **It starts from your own work.** `seed` reads papers, decks, talks and posters you already made, so the first draft is
+  already close.
+- **Yours to read and edit.** Plain text in a git repository in your home folder; your edits to the guide win.
+
+The tools follow one contract for this memory: [docs/style-vault.md](docs/style-vault.md).
+
+## Four tools, one for each moment
+
+After a brainstorm you report what you found; then you write the paper, give the talk, and pitch the work on a poster.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/figures/workflow-dark.svg">
+    <img src="docs/figures/workflow.svg" width="100%" alt="Four moments of research, four tools. PairDeck reports what you found: you comment on a slide in your browser, and your agent delivers an animated HTML deck that explains one idea. PairTeX writes the paper: you write %! comments in your LaTeX source, and your agent edits the paper on Overleaf, git or a folder. PairTalk gives the talk: you and your coauthors comment on the talk site or edit the script, and your agent delivers a talk with builds and a speaker script. PairPoster pitches the work on a poster: you draw boxes on the poster in your browser, and your agent delivers a print-ready poster, the PDF and the PNG. Under all four, your style vault, one per tool, seeded from your own papers, decks, talks and posters, grows with every edit you keep, rewrite or undo, and is read before every piece of work. Your agent does the thinking: Claude Code, Codex, or any agent that runs shell commands, on your own plan.">
+  </picture>
+</p>
+
 
 ### PairDeck: report what you found
 
@@ -88,6 +101,18 @@ comment. Only your own comments and script rewrites teach your talk style; your 
 
 **[Read the PairTalk page →](pairtalk/README.md)**
 
+### PairPoster: pitch it on a poster
+
+A poster is an advertisement for the paper, read standing, in a few seconds. Your agent turns the paper (or your LaTeX poster
+draft) into one web page at the venue's exact size, picture first: a schematic instead of a paragraph, phrases instead of
+sentences, charts redrawn from the paper's own figure data. It checks what a poster session will see (anything that spills,
+type too small at print size, blocks over their word budget), then you zoom in on the review page, drag a box and type. It
+prints the one-page vector PDF for the print shop and the PNG the venue's site asks for.
+
+<p align="center"><img src="pairposter/docs/img/review-thread.png" width="100%" alt="The PairPoster review page on the example poster about Simpson's paradox: a comment box over the block that shows which patients got which treatment, and in the side panel the comment and the agent's reply, with Keep and Follow up buttons."></p>
+
+**[Read the PairPoster page →](pairposter/README.md)**
+
 ## Why not just a chatbot?
 
 | | A chat window | PairLab |
@@ -113,26 +138,27 @@ store credentials (an Overleaf token, a Cloudflare login) yourself, once, in you
 
 ```sh
 git clone https://github.com/MarcusYF/pairlab && cd pairlab
-./install.sh                          # all three tools, or one: ./install.sh pairtex
+./install.sh                          # all four tools, or one: ./install.sh pairtex
 pairtex setup --name "Ada Lovelace"
 pairtex seed ~/papers/a ~/papers/b.pdf   # optional: your style, from your papers
 ```
 
 Then, in Claude Code or Codex, say what you want: *"watch mypaper"*, *"make a deck that explains this result"*, *"draft my
-talk from these slides"*. Each tool's page has its three-step start.
+talk from these slides"*, *"make a 140 × 90 cm poster for this paper"*. Each tool's page has its three-step start.
 
 | Tool | Needs | Feedback lives in | Data home |
 | --- | --- | --- | --- |
 | PairDeck | Python 3.9+, Chrome or Chromium | a local review page in your browser | `~/.pairdeck` |
 | PairTeX | Python 3.9+, git, latexmk | your LaTeX source (Overleaf, git, a folder) | `~/.pairtex` |
 | PairTalk | Node 22+, Python 3.9+, Chrome; Cloudflare optional | a local inbox, or a shared site for coauthors | `~/.pairtalk` |
+| PairPoster | Python 3.9+, Chrome | a local review page in your browser | `~/.pairposter` |
 
-All three run on macOS and Linux (Windows: WSL).
+All four run on macOS and Linux (Windows: WSL).
 
 ## Your data stays yours
 
 The tools talk only to the places you publish to (Overleaf, your git remote, your own Cloudflare site). Your papers, decks,
-talks, the evidence and the style guides stay in the data homes on your computer, each a git repository you can read, edit
+talks, posters, the evidence and the style guides stay in the data homes on your computer, each a git repository you can read, edit
 and revert. Your agent reads the files it works on and sends them to its model provider, as any coding agent does.
 
 ## Repository
@@ -142,8 +168,9 @@ and revert. Your agent reads the files it works on and sends them to its model p
 | [`pairdeck/`](pairdeck/README.md) | PairDeck: the `pairdeck` command, its skill, the deck engine, an example deck, tests |
 | [`pairtex/`](pairtex/README.md) | PairTeX: the `pairtex` command, its skill, templates, tests |
 | [`pairtalk/`](pairtalk/README.md) | PairTalk: the `pairtalk` command, its skill, the talk engine, the optional shared site, an example talk, tests |
+| [`pairposter/`](pairposter/README.md) | PairPoster: the `pairposter` command (PairDeck's program in its poster flavour), its skill, the poster engine, `tools/figdata.py`, an example poster, tests |
 | [`shared/`](shared/) | Code two tools share: reading slides and decks for `seed` |
-| [`docs/style-vault.md`](docs/style-vault.md) | The contract the three style vaults follow |
+| [`docs/style-vault.md`](docs/style-vault.md) | The contract the style vaults follow |
 | `install.sh`, [`AGENTS.md`](AGENTS.md) | Install one tool or all; how agents install and run them |
 | `bin/`, `skill` | Links to each tool's command, and PairTeX's skill where installs from before 0.5 expect it |
 | [`CHANGELOG.md`](CHANGELOG.md) | Releases of the suite; each tool has its own changelog |
@@ -151,7 +178,8 @@ and revert. Your agent reads the files it works on and sends them to its model p
 ## Status
 
 PairTeX 0.5 is in daily use on papers in progress, written on Overleaf with coauthors. PairDeck and PairTalk 0.1 are first
-public releases of tools built for the author's own research reports and conference talks. Issues and pull requests are
+public releases of tools built for the author's own research reports and conference talks; PairPoster 0.1 was built while
+polishing a conference poster with them. Issues and pull requests are
 welcome.
 
 ## Acknowledgments
@@ -159,7 +187,7 @@ welcome.
 PairTalk is built on [html-slide](https://github.com/Yanwei-Sun/html-slide) by **Yanwei Sun**, an HTML slide template for
 research talks whose comments a coding agent can act on; its slide engine, comment panel and review site started there
 ([pairtalk/NOTICE.md](pairtalk/NOTICE.md)). PairDeck's and PairTalk's slides use the Computer Modern fonts (SIL Open Font
-License) and MathJax (Apache 2.0).
+License) and MathJax (Apache 2.0); PairPoster's posters use Nunito (SIL Open Font License) and MathJax.
 
 ## License
 

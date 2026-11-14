@@ -1,15 +1,15 @@
-# The style vault: one contract, three tools
+# The style vault: one contract, four tools
 
-PairTeX (writing), PairDeck (report decks) and PairTalk (talks) each keep a **style vault**: a folder the author owns, outside
-this repository, in which the tool remembers how the author writes, designs and presents. The three tools share one contract,
-so a researcher who knows one knows all three. This page is that contract. Each tool's own `skill/references/learning.md` and
+PairTeX (writing), PairDeck (report decks), PairTalk (talks) and PairPoster (posters) each keep a **style vault**: a folder the author owns, outside
+this repository, in which the tool remembers how the author writes, designs and presents. The four tools share one contract,
+so a researcher who knows one knows them all. This page is that contract. Each tool's own `skill/references/learning.md` and
 `skill/references/seeding.md` say how its agent applies it.
 
 ## 1. What every tool provides
 
 | Piece | Contract |
 | --- | --- |
-| **Data home** | `~/.<tool>` (`~/.pairtex`, `~/.pairdeck`, `~/.pairtalk`), or `$<TOOL>_HOME`. Never inside the code folder. A git repository unless set up with `--no-git`, so every change to the vault is a commit the author can read and revert. |
+| **Data home** | `~/.<tool>` (`~/.pairtex`, `~/.pairdeck`, `~/.pairtalk`, `~/.pairposter`), or `$<TOOL>_HOME`. Never inside the code folder. A git repository unless set up with `--no-git`, so every change to the vault is a commit the author can read and revert. |
 | **No model of its own** | The CLI is deterministic plumbing (standard library, plus git, Chrome or Node where the tool needs them). All judgement runs in the coding agent the author already uses (Claude Code, Codex, or any agent that runs shell commands), on the author's own plan. No API key, no server of ours. |
 | **Skill** | `<tool>/skill/SKILL.md` plus `references/`, linked by `install.sh` into `~/.claude/skills/<tool>` (Claude Code) and `~/.agents/skills/<tool>` (Codex and other agents that read the open agent-skills format). |
 | **Commands** | `setup`, `paths`, `status`, `seed`, `learn`, and a feedback loop: `watch` (waits for the author's feedback, prints one batch, exits) and `resolve` (answers one item). Same names and flags in every tool. |
@@ -33,7 +33,8 @@ so a researcher who knows one knows all three. This page is that contract. Each 
 2. **Confirmed rules** (`S01`, `S02`, ...): three or more independent pieces of evidence and no counterexample, or stated by the
    author as general ("always", "never", "以后都").
 3. **Tentative patterns** (`T01`, ...): seen once or twice; applied only where the case clearly fits.
-4. **Domain table**: *Words and phrasing* (PairTeX), *Palette, type and layout* (PairDeck), *Pacing and script* (PairTalk).
+4. **Domain table**: *Words and phrasing* (PairTeX), *Palette, type and layout* (PairDeck; PairPoster uses the same heading for word budgets, type sizes and layout, and reads
+   PairDeck's guide for its palette and typeface), *Pacing and script* (PairTalk).
 5. **What the author undid**: edits the author reverted. Never repeat them.
 6. **Log**: one dated line per learning pass, naming the events and what changed.
 

@@ -559,7 +559,7 @@ def cmd_new(args) -> int:
         if not st.get("base"):
             take_snapshot(p, st, "author", "the deck as registered (the author's own version)")
             save_state(p, st)
-        print(f"Registered the existing deck {target} as {args.slug} (nothing overwritten; --force replaces it).")
+        print(f"Registered the existing {UNIT} {target} as {args.slug} (nothing overwritten; --force replaces it).")
         print(f"Its current version is the baseline: edits from now on are the author's own edits.")
         return 0
     out_dir.mkdir(parents=True, exist_ok=True)

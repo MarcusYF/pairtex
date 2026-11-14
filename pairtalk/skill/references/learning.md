@@ -2,7 +2,7 @@
 
 The loop collects evidence; the agent turns it into rules in the vault's `STYLE.md` (`pairtalk paths`). Do this at step 7 of
 every batch, and once more when the loop stops. The aim is a guide that makes the next first draft need fewer comments, not a
-diary of every edit. The contract all three PairLab tools share is `docs/style-vault.md` in the repository.
+diary of every edit. The contract all PairLab tools share is `docs/style-vault.md` in the repository.
 
 ## The evidence
 

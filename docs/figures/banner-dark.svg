@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 180" width="960" height="180" role="img" aria-label="PairLab: research tools that learn your style: pair-explain, pair-write, pair-present">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 180" width="960" height="180" role="img" aria-label="PairLab: work with your AI agent, interactively, in a style that adapts to yours">
 <style>text{font-family:'CMU Serif','Latin Modern Roman',Georgia,'Times New Roman',serif;fill:#E6EDF3} .m{font-family:Menlo,'SF Mono',Consolas,'DejaVu Sans Mono',monospace} .b{font-weight:700} .i{font-style:italic}</style>
 <defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#9198A1"/></marker><marker id="ag" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#D4A33A"/></marker><marker id="ap" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#B39DDB"/></marker><marker id="ay" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5AA8DA"/></marker><marker id="an" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L9,5 L1,9 Z" fill="#5DBB63"/></marker></defs>
 <text x="4" y="26" font-size="13.5" style="fill:#9198A1" letter-spacing="2.2">OPEN SOURCE  ·  MIT LICENSE  ·  FOR RESEARCHERS</text>
 <text x="0" y="104" font-size="78" class="b">Pair<tspan style="fill:#B39DDB">Lab</tspan></text>
-<text x="2" y="150" font-size="25">Research tools that <tspan class="b" style="fill:#E3B95A">learn your style</tspan>: pair-explain, pair-write, pair-present.</text>
+<text x="2" y="150" font-size="25">Work with your AI agent, <tspan class="b" style="fill:#5AA8DA">interactively</tspan>, in a style that <tspan class="b" style="fill:#E3B95A">adapts to yours</tspan>.</text>
 <rect x="2" y="168" width="170" height="3" fill="#D4A33A"/>
 </svg>

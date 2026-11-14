@@ -1,5 +1,5 @@
 <!-- TABBAR -->
-<p align="center"><a href="../README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-overview-off-dark.svg"><img src="../docs/figures/tab-overview-off.svg" width="200" alt="PairLab: the suite"></picture></a><a href="../pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairdeck-off-dark.svg"><img src="../docs/figures/tab-pairdeck-off.svg" width="200" alt="PairDeck: report"></picture></a><a href="../pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtex-on-dark.svg"><img src="../docs/figures/tab-pairtex-on.svg" width="200" alt="PairTeX: write"></picture></a><a href="../pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtalk-off-dark.svg"><img src="../docs/figures/tab-pairtalk-off.svg" width="200" alt="PairTalk: present"></picture></a></p>
+<p align="center"><a href="../README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-overview-off-dark.svg"><img src="../docs/figures/tab-overview-off.svg" width="176" alt="PairLab: the suite"></picture></a><a href="../pairdeck/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairdeck-off-dark.svg"><img src="../docs/figures/tab-pairdeck-off.svg" width="176" alt="PairDeck: report"></picture></a><a href="../pairtex/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtex-on-dark.svg"><img src="../docs/figures/tab-pairtex-on.svg" width="176" alt="PairTeX: write"></picture></a><a href="../pairtalk/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairtalk-off-dark.svg"><img src="../docs/figures/tab-pairtalk-off.svg" width="176" alt="PairTalk: present"></picture></a><a href="../pairposter/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="../docs/figures/tab-pairposter-off-dark.svg"><img src="../docs/figures/tab-pairposter-off.svg" width="176" alt="PairPoster: pitch"></picture></a></p>
 <!-- /TABBAR -->
 
 <p align="center">
@@ -19,6 +19,9 @@
 You type a comment into the LaTeX source, right where the text is (`%! make this tighter..`). About a minute later the agent has
 edited the text, put its reply in a green note next to your comment, and published both back to the same paper. Every edit you
 keep, rewrite or undo teaches it your style, so its first drafts need fewer comments over time.
+
+- **Interactive.** Write `%! make this tighter..` right in your LaTeX source; about a minute later the edit and a green reply note are in the paper.
+- **Adaptive.** Your writing-style guide grows from every edit you keep, rewrite or undo, and from what you state as a rule; it can start from your past papers.
 
 <p align="center">
   <picture>
