@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE_TEXT}}</title>
+<meta name="description" content="{{DESCRIPTION}}">
+<!-- Page size in mm (the venue's maximum), the smallest type in pt, and the word budgets `pairposter qa` checks. -->
+<meta name="pairposter" content='{"width_mm": {{W}}, "height_mm": {{H}}, "min_pt": 24, "words": 300, "block_words": 45}'>
+<link rel="stylesheet" href="{{ENGINE}}poster.css">
+<style>
+  /* This poster's colours and sizes (override the engine's tokens). */
+  :root { --accent: #27709c; --accent-2: #3d8fc0; --accent-soft: #e6f0f7; }
+  .pp-body { grid-template-columns: 1fr 1.15fr 1fr; }
+</style>
+<script>
+  window.MathJax = {
+    loader: { load: ["ui/safe"], paths: { mathjax: "{{ENGINE}}mathjax" } },
+    tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]], displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+           macros: { E: "\\mathbb{E}" } },
+    chtml: { fontURL: "{{ENGINE}}mathjax/output/chtml/fonts/woff-v2", mtextInheritFont: false, scale: 1 },
+    options: { enableMenu: false }
+  };
+</script>
+<script defer src="{{ENGINE}}mathjax/tex-chtml-full.js"></script>
+<script defer src="{{ENGINE}}poster.js"></script>
+</head>
+<body>
+<div class="pp-view dk-deck">
+<div class="pp-sizer">
+<article class="pp-poster dk-slide is-current" data-label="Poster">
+<div class="pp-stage dk-inner">
+
+  <header class="pp-head" data-label="Title">
+    <div class="pp-titles">
+      <h1 class="pp-title dk-h">{{TITLE_HTML}}</h1>
+      <p class="pp-authors">{{SUBTITLE}}</p>
+      <p class="pp-affil">TODO: affiliations (or delete)</p>
+      <p class="pp-venue">{{META}}</p>
+    </div>
+    <div class="pp-logos">
+      <!-- TODO: logos (img, about 70 mm tall) and a QR card to the paper:
+           <a class="pp-qr"><img src="img/qr-paper.svg" alt="QR code: the paper"><span class="pp-t">Paper</span></a> -->
+    </div>
+  </header>
+
+  <div class="pp-body">
+
+    <div class="pp-col">
+      <section class="pp-block" data-label="Why">
+        <h2 class="pp-h"><span class="pp-num">1</span>TODO: why it matters</h2>
+        <!-- Cause and effect as an icon chain, three to five steps, a few words each. -->
+        <div class="pp-chain pp-v">
+          <div class="pp-step"><span class="pp-disc"><svg class="pp-ico"><use href="#search"/></svg></span><span class="pp-t">TODO: what happens</span></div>
+          <svg class="pp-arrow"><use href="#arrow-right"/></svg>
+          <div class="pp-step"><span class="pp-disc"><svg class="pp-ico"><use href="#alert"/></svg></span><span class="pp-t">TODO: what goes wrong</span></div>
+          <svg class="pp-arrow"><use href="#arrow-right"/></svg>
+          <div class="pp-step"><span class="pp-disc"><svg class="pp-ico"><use href="#trend-down"/></svg></span><span class="pp-t">TODO: the cost</span></div>
+        </div>
+      </section>
+      <section class="pp-block pp-tint pp-grow" data-label="Question">
+        <h2 class="pp-h"><svg class="pp-ico"><use href="#question"/></svg>Question</h2>
+        <p class="pp-lead">TODO: the question, in one line</p>
+      </section>
+    </div>
+
+    <div class="pp-col">
+      <section class="pp-block pp-grow" data-label="Idea">
+        <h2 class="pp-h"><span class="pp-num">2</span>TODO: the idea</h2>
+        <figure class="pp-fig">
+          <!-- TODO: the one picture that explains the idea (inline SVG, or img at 200+ dpi at its printed size). -->
+          <svg class="pp-chart" viewBox="0 0 600 300" width="600" height="300"><rect x="1" y="1" width="598" height="298" rx="12" fill="none" stroke="#c9d0db" stroke-dasharray="8 8"/><text x="300" y="165" text-anchor="middle" font-size="44">TODO: figure</text></svg>
+          <figcaption class="pp-cap">TODO: a caption of a few words (or delete)</figcaption>
+        </figure>
+        <div class="pp-eq">$$ \text{TODO: the one formula worth a glance} $$</div>
+        <div class="pp-cards" style="--n: 2">
+          <div class="pp-card"><span class="pp-k"><svg class="pp-ico"><use href="#link"/></svg>TODO</span><span class="pp-t">TODO: three to six words</span></div>
+          <div class="pp-card"><span class="pp-k"><svg class="pp-ico"><use href="#coin"/></svg>TODO</span><span class="pp-t">TODO: three to six words</span></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="pp-col">
+      <section class="pp-block pp-grow" data-label="Results">
+        <h2 class="pp-h"><span class="pp-num">3</span>TODO: what we found</h2>
+        <div class="pp-stats">
+          <div class="pp-stat"><span class="pp-n">TODO</span><span class="pp-t">TODO: what the number is</span></div>
+          <div class="pp-stat"><span class="pp-n">TODO</span><span class="pp-t">TODO: what the number is</span></div>
+        </div>
+        <ul class="pp-list">
+          <li><span class="pp-t">TODO: a phrase, not a sentence</span></li>
+          <li><span class="pp-t">TODO: a phrase, not a sentence</span></li>
+        </ul>
+      </section>
+    </div>
+
+  </div>
+
+  <footer class="pp-foot" data-label="Takeaway">
+    <div class="pp-take" style="flex: 1"><svg class="pp-ico"><use href="#bulb"/></svg><span class="pp-t">TODO: the one line a passer-by should remember</span></div>
+  </footer>
+
+</div>
+</article>
+</div>
+</div>
+{{ICONS}}
+</body>
+</html>

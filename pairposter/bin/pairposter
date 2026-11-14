@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""pairposter (PairPoster): runs PairDeck's program as its poster flavour (../../pairdeck/bin/pairdeck).
+
+Posters share PairDeck's review page, watcher, snapshots, style learning and seeding; the poster flavour brings its own data
+home (~/.pairposter), template and engine (../skill/assets), checks (`qa`) and `print`. `pairposter --help` lists the commands.
+"""
+import os
+import runpy
+import sys
+from pathlib import Path
+
+APP = Path(__file__).resolve().parent.parent
+CORE = APP.parent / "pairdeck" / "bin" / "pairdeck"
+if not CORE.exists():
+    sys.exit(f"pairposter: {CORE} is missing; PairPoster runs on PairDeck's code (keep the PairLab folders together)")
+os.environ["PAIRLAB_FLAVOR"] = "poster"
+sys.argv[0] = "pairposter"
+runpy.run_path(str(CORE), run_name="__main__")

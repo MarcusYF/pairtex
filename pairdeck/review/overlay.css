@@ -98,3 +98,5 @@ body.pd-open .dk-rotate { display: none; }
   body.pd-open .pd-fab, body.pd-open .pd-count { right: 16px; bottom: calc(52vh + 12px); }
   body.pd-open .pd-count { bottom: calc(52vh + 58px); }
 }
+
+.pd-tabs[hidden] { display: none; }

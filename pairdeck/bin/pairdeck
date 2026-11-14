@@ -47,21 +47,35 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 
-VERSION = "0.1.0"
 APP = Path(__file__).resolve().parent.parent
-SKILL = APP / "skill"
+# PairPoster runs this same program as a flavour: ../pairposter/bin/pairposter sets PAIRLAB_FLAVOR=poster. A poster gets its
+# own data home, template, engine, checks (`qa`) and `print`; the review page, watch, resolve, snapshot, learn and seed are
+# shared with decks.
+POSTER = os.environ.get("PAIRLAB_FLAVOR") == "poster"
+CLI = "pairposter" if POSTER else "pairdeck"
+TOOL = "PairPoster" if POSTER else "PairDeck"
+UNIT = "poster" if POSTER else "deck"
+VERSION = "0.1.0" if POSTER else "0.1.1"
+POSTER_APP = APP.parent / "pairposter"
+SKILL = (POSTER_APP if POSTER else APP) / "skill"
 ENGINE = SKILL / "assets" / "engine"
 TEMPLATE = SKILL / "assets" / "template.html"
-TEMPLATES = APP / "templates"
+TEMPLATES = (POSTER_APP if POSTER else APP) / "templates"
+ENGINE_CSS = "poster.css" if POSTER else "deck.css"
+ENGINE_JS = "poster.js" if POSTER else "deck.js"
+ENGINE_DIR = "_poster" if POSTER else "_deck"
 REVIEW_ASSETS = APP / "review"
 SEED_SCRIPT = APP.parent / "shared" / "seed_visual.py"
-DEFAULT_HOME = Path.home() / ".pairdeck"
+DEFAULT_HOME = Path.home() / f".{CLI}"
+HOME_VAR = "PAIRPOSTER_HOME" if POSTER else "PAIRDECK_HOME"
+# A poster's visual look (palette, type) comes from PairDeck's style guide; its poster rules from its own.
+DECK_STYLE_MD = Path(os.environ.get("PAIRDECK_HOME") or Path.home() / ".pairdeck").expanduser() / "vault" / "STYLE.md"
 
 EXIT_BATCH, EXIT_NOTHING, EXIT_MISSING, EXIT_UNSNAPPED, EXIT_LOCKED = 0, 1, 2, 4, 5
 
 
 def home_env() -> str:
-    return os.environ.get("PAIRDECK_HOME", "")
+    return os.environ.get(HOME_VAR, "")
 
 
 def data_home() -> Path:
@@ -79,7 +93,7 @@ def load_profile() -> dict:
     try:
         return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     except ValueError as exc:
-        sys.exit(f"pairdeck: {PROFILE_PATH} is not valid JSON: {exc}")
+        sys.exit(f"{CLI}: {PROFILE_PATH} is not valid JSON: {exc}")
 
 
 PROFILE = load_profile()
@@ -251,7 +265,7 @@ def mark_events(ids: set, key: str, value: dict) -> int:
 
 def style_summary() -> str:
     if not STYLE_MD.exists():
-        return f"{STYLE_MD} (missing: `pairdeck setup` creates it)"
+        return f"{STYLE_MD} (missing: `{CLI} setup` creates it)"
     text = read_text(STYLE_MD)
     rules = len(re.findall(r"^### ", text, re.M))
     rows = len([ln for ln in text.split("## Palette, type and layout", 1)[-1].split("\n## ", 1)[0].splitlines()
@@ -261,7 +275,8 @@ def style_summary() -> str:
 
 # ------------------------------------------------------------------------------------ projects
 
-DEFAULT_WATCH = ["*.html", "*.htm", "*.css", "*.js", "*.svg", "*.md", "_deck/deck.css", "_deck/deck.js"]
+DEFAULT_WATCH = ["*.html", "*.htm", "*.css", "*.js", "*.svg", "*.md", "img/*.svg", "_poster/poster.css", "_poster/poster.js"] \
+    if POSTER else ["*.html", "*.htm", "*.css", "*.js", "*.svg", "*.md", "_deck/deck.css", "_deck/deck.js"]
 
 
 class Project:
@@ -272,8 +287,8 @@ class Project:
         if not cfg_path.exists():
             known = ", ".join(sorted(p.name for p in PROJECTS.iterdir() if (p / "project.json").exists())) \
                 if PROJECTS.exists() else ""
-            raise PdError(f"no deck '{slug}' in {PROJECTS} (known: {known or 'none'}). "
-                          f"Create one with: pairdeck new {slug} --title \"…\"", EXIT_MISSING)
+            raise PdError(f"no {UNIT} '{slug}' in {PROJECTS} (known: {known or 'none'}). "
+                          f"Create one with: {CLI} new {slug} --title \"…\"", EXIT_MISSING)
         self.cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         self.deck_dir = Path(self.cfg["dir"]).expanduser()
         self.deck = self.deck_dir / self.cfg.get("file", "index.html")
@@ -410,8 +425,8 @@ def ensure_not_watching(p: Project, what: str) -> None:
 
 # ------------------------------------------------------------------------------------ the deck engine
 
-CSS_RE = re.compile(r'<link[^>]+href="([^"]*?)deck\.css"[^>]*>')
-JS_RE = re.compile(r'<script[^>]+src="([^"]*?)deck\.js"[^>]*>\s*</script>')
+CSS_RE = re.compile(r'<link[^>]+href="([^"]*?)' + re.escape(ENGINE_CSS) + r'"[^>]*>')
+JS_RE = re.compile(r'<script[^>]+src="([^"]*?)' + re.escape(ENGINE_JS) + r'"[^>]*>\s*</script>')
 
 
 def engine_prefix(page: str) -> str | None:
@@ -433,14 +448,14 @@ def find_engine(deck_path, page: str, explicit=None):
         d = deck_dir
         while True:
             cand = os.path.join(d, rel)
-            if os.path.isfile(os.path.join(cand, "deck.css")):
+            if os.path.isfile(os.path.join(cand, ENGINE_CSS)):
                 return cand, d
             parent = os.path.dirname(d)
             if parent == d:
                 return None, None
             d = parent
     eng = os.path.normpath(os.path.join(deck_dir, prefix))
-    if os.path.isfile(os.path.join(eng, "deck.css")):
+    if os.path.isfile(os.path.join(eng, ENGINE_CSS)):
         return eng, os.path.commonpath([deck_dir, eng])
     return None, None
 
@@ -460,7 +475,7 @@ def find_chrome() -> str:
 def run_chrome(cmd, **kw):
     """Run headless Chrome with a throwaway profile (Chrome otherwise leaves a profile folder behind on every launch) and
     a mock keychain (on macOS, Chrome can otherwise wait for keychain access and never finish)."""
-    profile = tempfile.mkdtemp(prefix="pairdeck-chrome-")
+    profile = tempfile.mkdtemp(prefix=f"{CLI}-chrome-")
     try:
         return subprocess.run([cmd[0], f"--user-data-dir={profile}", "--use-mock-keychain", *cmd[1:]], **kw)
     finally:
@@ -478,7 +493,7 @@ def resolve_deck(arg: str) -> tuple[Path, Project | None]:
     if path.is_dir():
         path = path / "index.html"
     if not path.exists():
-        raise PdError(f"no deck '{arg}': neither a registered slug ({', '.join(project_slugs()) or 'none'}) nor a file",
+        raise PdError(f"no {UNIT} '{arg}': neither a registered slug ({', '.join(project_slugs()) or 'none'}) nor a file",
                       EXIT_MISSING)
     path = path.resolve()
     for slug in project_slugs():  # a path to a registered deck still counts as that project
@@ -532,7 +547,7 @@ def cmd_new(args) -> int:
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", args.slug):
         raise PdError("the slug is a short lowercase name: letters, digits and hyphens (e.g. simpsons-paradox)")
     if not PROFILE_PATH.exists():
-        raise PdError("no profile yet: run `pairdeck setup --name \"Your Name\"` first")
+        raise PdError(f"no profile yet: run `{CLI} setup --name \"Your Name\"` first")
     out_dir = Path(args.dir).expanduser().absolute() if args.dir else Path.cwd() / args.slug
     target = out_dir / args.file
     title_text = args.title.replace("|", " ").strip()
@@ -551,8 +566,8 @@ def cmd_new(args) -> int:
     if args.engine_url:
         engine = args.engine_url if args.engine_url.endswith("/") else args.engine_url + "/"
     else:
-        copy_engine(out_dir / "_deck")
-        engine = "_deck/"
+        copy_engine(out_dir / ENGINE_DIR)
+        engine = ENGINE_DIR + "/"
     title_html = "<br>".join(htmlmod.escape(x.strip(), quote=False) for x in args.title.split("|"))
     esc = lambda s: htmlmod.escape(s, quote=True).replace("&#x27;", "'")  # noqa: E731  (attributes use double quotes)
     page = read_text(TEMPLATE)
@@ -565,15 +580,20 @@ def cmd_new(args) -> int:
                         if args.source_url else "<span></span>"),
         "NOTE_LINKS": (f'<a href="{esc(args.source_url)}" target="_blank" rel="noopener">{esc(args.source_label)}</a>'
                        if args.source_url else "TODO: links for readers who want more (or delete this note)"),
+        **(poster_subs(args) if POSTER else {}),
     }.items():
         page = page.replace("{{" + key + "}}", val)
     write_text(target, page)
     p = register(args.slug, out_dir, args.file, title_text, engine)
     print(f"Created {target}")
-    print(f"Engine: {engine}" + ("" if args.engine_url else f" (copied to {out_dir / '_deck'})"))
+    print(f"Engine: {engine}" + ("" if args.engine_url else f" (copied to {out_dir / ENGINE_DIR})"))
     print(f"Registered as {args.slug}: {p.dir}")
-    print(f"Next: write the slides (replace every TODO), `pairdeck qa {args.slug}`, look at every screenshot, "
-          f"then `pairdeck snapshot {args.slug}`.")
+    if POSTER:
+        print(f"Next: write the poster (replace every TODO), `{CLI} qa {args.slug}`, look at the full view and every "
+              f"close-up, then `{CLI} snapshot {args.slug}`.")
+    else:
+        print(f"Next: write the slides (replace every TODO), `{CLI} qa {args.slug}`, look at every screenshot, "
+              f"then `{CLI} snapshot {args.slug}`.")
     return 0
 
 
@@ -643,7 +663,7 @@ def lint(page, engine_dir, bundled):
     slides = [n for n in nodes if "dk-slide" in n.cls()]
 
     if engine_dir is None and not bundled:
-        errors.append("engine not found: the deck.css link does not resolve on disk (use --root or fix the href)")
+        errors.append(f"engine not found: the {ENGINE_CSS} link does not resolve on disk (use --root or fix the href)")
     if not slides:
         errors.append("no <section class=\"dk-slide\"> found")
     elif not 6 <= len(slides) <= 10:
@@ -909,6 +929,8 @@ def contact_sheet(out, title):
 
 
 def cmd_qa(args) -> int:
+    if POSTER:
+        return poster_qa(args)
     deck_path, p = resolve_deck(args.deck)
     deck = str(deck_path)
     page = read_text(deck)
@@ -940,7 +962,7 @@ def cmd_qa(args) -> int:
     elif p:
         out = str(p.dir / "qa")
     else:
-        out = os.path.join(tempfile.gettempdir(), "pairdeck-qa", name if name != "index" else folder)
+        out = os.path.join(tempfile.gettempdir(), f"{CLI}-qa", name if name != "index" else folder)
     os.makedirs(out, exist_ok=True)
     tmp_shot = os.path.join(os.path.dirname(deck), f".qa-{name}.html")
     tmp_layout = os.path.join(os.path.dirname(deck), f".qa-{name}-layout.html")
@@ -1134,7 +1156,7 @@ def cmd_bundle(args) -> int:
     if rel:
         print("note: root-relative links remain and will not work outside the original site: " + ", ".join(rel[:6])
               + (" …" if len(rel) > 6 else ""))
-    print(f"Check it like the deck: pairdeck qa \"{out}\"")
+    print(f"Check it like the deck: {CLI} qa \"{out}\"")
     return 0
 
 
@@ -1456,17 +1478,17 @@ def comment_threads(p: Project, sent: set | None = None) -> list[dict]:
     return comments
 
 
-GENERAL = re.compile(r"\b(always|never|every (?:time|slide|deck)|all (?:slides|decks)|everywhere|in general|from now on|"
-                     r"by default|as a rule|don'?t ever|do not ever|in future|in every)\b|以后|总是|永远|不要再|每次|所有的?(?:slide|幻灯片|页)",
-                     re.I)
+GENERAL = re.compile(r"\b(always|never|every (?:time|slide|deck|poster)|all (?:slides|decks|posters)|everywhere|in general|"
+                     r"from now on|by default|as a rule|don'?t ever|do not ever|in future|in every)\b|以后|总是|永远|不要再|每次|"
+                     r"所有的?(?:slide|幻灯片|页|海报)", re.I)
 
 
 def describe_box(c: dict) -> str:
     b = c.get("box")
     if not b:
-        return "the whole slide"
+        return f"the whole {'poster' if POSTER else 'slide'}"
     return (f"x {b['x']:.2f}–{b['x'] + b['w']:.2f}, y {b['y']:.2f}–{b['y'] + b['h']:.2f} "
-            f"(fractions of the slide's content area)")
+            f"(fractions of {'the poster' if POSTER else 'the slide' + chr(39) + 's content area'})")
 
 
 def comment_events(p: Project, threads: list[dict], batch: list[dict]) -> list[dict]:
@@ -1489,7 +1511,10 @@ def comment_events(p: Project, threads: list[dict], batch: list[dict]) -> list[d
 # ------------------------------------------------------------------------------------ review server
 
 def overlay_tags(p: Project) -> str:
-    cfg = {"slug": p.slug, "title": p.title, "author": HANDLE, "agent": AGENT, "version": VERSION}
+    cfg = {"slug": p.slug, "title": p.title, "author": HANDLE, "agent": AGENT, "version": VERSION, "tool": TOOL, "cli": CLI,
+           "unit": UNIT}
+    if POSTER:
+        cfg["anchors"] = POSTER_ANCHORS
     return ('<link rel="stylesheet" href="/__pairdeck/overlay.css">\n'
             f'<script>window.PAIRDECK = {json.dumps(cfg)};</script>\n'
             '<script defer src="/__pairdeck/overlay.js"></script>\n')
@@ -1602,7 +1627,8 @@ def make_handler(p: Project, root: Path, deck_url: str, port_box: list):
                         return d
                 rec = {"type": "comment", "author": HANDLE, "slide": max(1, num("slide", 1)),
                        "slide_id": str(body.get("slide_id", ""))[:120], "label": str(body.get("label", ""))[:120],
-                       "title": str(body.get("title", ""))[:300], "step": max(0, num("step")), "steps": max(0, num("steps")),
+                       "title": str(body.get("title", ""))[:300], "block": str(body.get("block", ""))[:120],
+                       "step": max(0, num("step")), "steps": max(0, num("steps")),
                        "box": box, "anchor": anchor, "under": str(body.get("under", ""))[:400], "text": text,
                        "parent": parent,
                        "viewport": body.get("viewport") if isinstance(body.get("viewport"), list) else None}
@@ -1650,8 +1676,8 @@ def cmd_review(args) -> int:
     if engine_dir is None:
         print("note: the deck's engine link does not resolve on disk; the page may load without its styles")
     print(f"review page for {p.slug}: {url}", flush=True)
-    print("Comment button (or the c key): drag a box on the slide, type, Send. Replies appear under each comment.",
-          flush=True)
+    print(f"Comment button (or the c key): drag a box on the {'poster' if POSTER else 'slide'}, type, Send. "
+          "Replies appear under each comment." + (" Zoom: + and -, 0 fits, 1 is print size." if POSTER else ""), flush=True)
     if args.open:
         import webbrowser
         webbrowser.open(url)
@@ -1682,8 +1708,11 @@ def render_event_line(e: dict) -> str:
 
 
 def render_comment(p: Project, c: dict, threads: dict, review_url: str | None) -> str:
-    where = f"slide {c['slide']}" + (f" ({c['label']})" if c.get("label") else "") + \
-        (f" \"{c['title']}\"" if c.get("title") else "")
+    if POSTER:
+        where = (f"block \"{c['block']}\"" if c.get("block") else "the poster")
+    else:
+        where = f"slide {c['slide']}" + (f" ({c['label']})" if c.get("label") else "") + \
+            (f" \"{c['title']}\"" if c.get("title") else "")
     steps = f" · build step {c.get('step', 0)} of {c.get('steps', 0)}" if c.get("steps") else ""
     out = [f"## {c['id']} · {where}{steps}"]
     if c.get("parent") and c["parent"] in threads:
@@ -1713,11 +1742,14 @@ def emit_batch(p: Project, st: dict, fresh: list[dict], edits: list[dict], base_
     if edits:
         parts.append(f"{len(edits)} edit{'s' if len(edits) != 1 else ''} by {HANDLE}")
     meta = snapshot_meta(p, base_before)
-    out = [f"# PairDeck · {p.slug} · {' · '.join(parts) or 'style evidence'} · {now_iso()}", "",
-           f"Deck: {p.deck}" + (f" · review page: {review_url}" if review_url else " · review page: not running "
-                                                                                  f"(`pairdeck review {p.slug}`)"),
+    out = [f"# {TOOL} · {p.slug} · {' · '.join(parts) or 'style evidence'} · {now_iso()}", "",
+           f"{UNIT.capitalize()}: {p.deck}" + (f" · review page: {review_url}" if review_url else " · review page: not running "
+                                                                                              f"(`{CLI} review {p.slug}`)"),
            f"Compared with snapshot {base_before or '(none)'}" + (f" ({meta['by']}, {meta['time']})" if meta else ""),
-           f"Style guide: {style_summary()} · deck notes: {p.dir / 'NOTES.md'}", ""]
+           f"Style guide: {style_summary()} · {UNIT} notes: {p.dir / 'NOTES.md'}"]
+    if POSTER:
+        out.append(f"Visual look (palette, type): {DECK_STYLE_MD}" + ("" if DECK_STYLE_MD.exists() else " (none yet)"))
+    out.append("")
     for c in fresh:
         out += [render_comment(p, by_id.get(c["id"], c), by_id, review_url), ""]
     open_old = [c["id"] for c in threads if c["status"] == "with the agent" and c["id"] not in {x["id"] for x in fresh}]
@@ -1733,16 +1765,19 @@ def emit_batch(p: Project, st: dict, fresh: list[dict], edits: list[dict], base_
         out += [f"## Style evidence not yet learned ({len(rest)})", ""]
         out += [render_event_line(e) for e in rest[:40]]
         if len(rest) > 40:
-            out.append(f"- … and {len(rest) - 40} more (`pairdeck learn {p.slug}`)")
+            out.append(f"- … and {len(rest) - 40} more (`{CLI} learn {p.slug}`)")
         out.append("")
     ids = " ".join(c["id"] for c in fresh) or "(none)"
+    qa_line = (f"3. QA: `{CLI} qa {p.slug}`; fix every overflow and size error, and look at the full view and the close-ups."
+               if POSTER else
+               f"3. QA the slides you changed: `{CLI} qa {p.slug} --slides N,M`, and look at the screenshots.")
     out += ["## Next", "",
-            f"1. Read the style guide if its sha changed, and the deck notes. Comments: {ids}.",
-            f"2. Edit the deck in {p.deck_dir}. After each comment: `pairdeck resolve {p.slug} <id> \"reply\"`.",
-            f"3. QA the slides you changed: `pairdeck qa {p.slug} --slides N,M`, and look at the screenshots.",
-            f"4. `pairdeck snapshot {p.slug}` (the author's next edits are compared with it).",
-            f"5. Learn: `pairdeck learn {p.slug}`, update STYLE.md, `pairdeck learn {p.slug} --ack <E-ids>`, commit the vault.",
-            f"6. Start `pairdeck watch {p.slug}` again in the background, and report in two to four lines."]
+            f"1. Read the style guide if its sha changed, and the {UNIT} notes. Comments: {ids}.",
+            f"2. Edit the {UNIT} in {p.deck_dir}. After each comment: `{CLI} resolve {p.slug} <id> \"reply\"`.",
+            qa_line,
+            f"4. `{CLI} snapshot {p.slug}` (the author's next edits are compared with it).",
+            f"5. Learn: `{CLI} learn {p.slug}`, update STYLE.md, `{CLI} learn {p.slug} --ack <E-ids>`, commit the vault.",
+            f"6. Start `{CLI} watch {p.slug}` again in the background, and report in two to four lines."]
     text = "\n".join(out) + "\n"
     batches = p.dir / "batches"
     batches.mkdir(exist_ok=True)
@@ -1772,15 +1807,15 @@ def cmd_watch(args) -> int:
         sid = take_snapshot(p, st, "author", "baseline taken by watch: no snapshot yet")
         save_state(p, st)
         print(f"note: no snapshot of {p.slug} yet; took {sid} as the baseline. After building or changing the deck, run "
-              f"`pairdeck snapshot {p.slug}` so the author's edits are compared with the agent's version.",
+              f"`{CLI} snapshot {p.slug}` so the author's edits are compared with the agent's version.",
               file=sys.stderr, flush=True)
     if agent_work_since_base(p, st) and not args.edits_are_author:
         raise PdError(f"the deck changed since snapshot {st['base']} and comments were answered since: run "
-                      f"`pairdeck snapshot {p.slug}` first, so your edits are not read as the author's "
+                      f"`{CLI} snapshot {p.slug}` first, so your edits are not read as the author's "
                       f"(or pass --edits-are-author if the author made them)", EXIT_UNSNAPPED)
     srv = p.server()
     print(f"watching {p.slug}: comments from the review page" + (f" ({srv['url']})" if srv else
-          f" (not running: `pairdeck review {p.slug}`)") + f" and edits to {p.deck_dir}; a batch is sent "
+          f" (not running: `{CLI} review {p.slug}`)") + f" and edits to {p.deck_dir}; a batch is sent "
           f"{args.settle:g}s after the last change.", file=sys.stderr, flush=True)
     sig = p.signature()
     base_files = snapshot_files(p, st.get("base"))
@@ -1815,7 +1850,7 @@ def cmd_watch(args) -> int:
             return EXIT_NOTHING
         if args.max_hours and t - started > args.max_hours * 3600:
             save_state(p, st)
-            print(f"pairdeck: watched {p.slug} for {args.max_hours:g} h without feedback; stopped.")
+            print(f"{CLI}: watched {p.slug} for {args.max_hours:g} h without feedback; stopped.")
             return EXIT_NOTHING
         time.sleep(args.interval)
 
@@ -1824,7 +1859,7 @@ def cmd_resolve(args) -> int:
     p = Project(args.slug)
     reply = read_text(args.reply_file) if args.reply_file else args.reply
     if not reply or not reply.strip():
-        raise PdError("give the reply: pairdeck resolve SLUG ID \"reply\" (or --reply-file FILE)")
+        raise PdError(f"give the reply: {CLI} resolve SLUG ID \"reply\" (or --reply-file FILE)")
     threads = {c["id"]: c for c in comment_threads(p)}
     cid = args.cid if args.cid.startswith("c") else "c" + args.cid
     if cid not in threads:
@@ -1887,7 +1922,7 @@ def cmd_learn(args) -> int:
         print(f"{len(left)} still pending" + (f" in {args.slug}" if args.slug and not args.all else ""))
         return 0
     if not args.slug and not args.all:
-        raise PdError("name a deck (pairdeck learn SLUG) or pass --all")
+        raise PdError(f"name a {UNIT} ({CLI} learn SLUG) or pass --all")
     slugs = project_slugs() if args.all else [args.slug]
     for slug in slugs:  # pick up edits and Keep clicks the watcher has not seen (it is not running)
         p = Project(slug)
@@ -1907,7 +1942,7 @@ def cmd_learn(args) -> int:
         return 0
     for e in events:
         print_event(e)
-    print(f"Distil these into {STYLE_MD} (references/learning.md), then: pairdeck learn --ack "
+    print(f"Distil these into {STYLE_MD} (references/learning.md), then: {CLI} learn --ack "
           + " ".join(e["id"] for e in events))
     return 0
 
@@ -1924,7 +1959,7 @@ def cmd_seed(args) -> int:
     if args.list:
         ids = seed_ids()
         if not ids:
-            print("no seeds yet: pairdeck seed <your past decks: .pptx, .pdf, .html, or folders>")
+            print(f"no seeds yet: {CLI} seed <your past {UNIT}s: .pptx, .pdf, .html, or folders>")
             return 0
         events = evidence_rows()
         for sid in ids:
@@ -1941,7 +1976,7 @@ def cmd_seed(args) -> int:
     if args.forget:
         sid = args.forget
         if sid not in seed_ids():
-            raise PdError(f"no seed '{sid}' (pairdeck seed --list)")
+            raise PdError(f"no seed '{sid}' ({CLI} seed --list)")
         ids = {e["id"] for e in evidence_rows() if e.get("kind") == "seed" and e.get("seed") == sid}
         n = mark_events(ids, "discarded", {"why": "seed forgotten", "date": now_iso()}) if ids else 0
         shutil.rmtree(SEEDS / sid)
@@ -1949,11 +1984,11 @@ def cmd_seed(args) -> int:
               f"was this seed should be removed by hand.")
         return 0
     if not args.paths:
-        raise PdError("give files or folders: pairdeck seed ~/talks/old-deck.pptx ~/talks/exports/ [--note \"…\"]")
+        raise PdError(f"give files or folders: {CLI} seed ~/talks/old-{UNIT}.pdf ~/talks/exports/ [--note \"…\"]")
     if not SEED_SCRIPT.exists():
         raise PdError(f"{SEED_SCRIPT} is missing (it ships with the PairLab repository)")
     if not PROFILE_PATH.exists():
-        raise PdError("no profile yet: run `pairdeck setup --name \"Your Name\"` first")
+        raise PdError(f"no profile yet: run `{CLI} setup --name \"Your Name\"` first")
     SEEDS.mkdir(parents=True, exist_ok=True)
     nums = [int(x.split("-")[1]) for x in seed_ids() if x.startswith("seed-") and x.split("-")[1].isdigit()]
     sid = f"seed-{(max(nums) + 1) if nums else 1:03d}"
@@ -1992,7 +2027,7 @@ def cmd_seed(args) -> int:
             print(f"  skipped {f.get('name')}: {f['skipped']}")
     print(f"events: {', '.join(ids)}")
     print(f"next: your agent reads {out / 'samples.md'}, stats.json and the page images, drafts entries in {STYLE_MD} "
-          f"(references/seeding.md), shows you the five to ten strongest, then runs: pairdeck learn --ack {' '.join(ids)}")
+          f"(references/seeding.md), shows you the five to ten strongest, then runs: {CLI} learn --ack {' '.join(ids)}")
     return 0
 
 
@@ -2049,7 +2084,7 @@ def cmd_setup(args) -> int:
     prof = json.loads(prof_path.read_text(encoding="utf-8")) if prof_path.exists() else {}
     name = args.name or prof.get("name") or global_git("user.name")
     if not name:
-        raise PdError("give your name: pairdeck setup --name \"Ada Lovelace\"")
+        raise PdError(f"give your name: {CLI} setup --name \"Ada Lovelace\"")
     prof.update(name=name, handle=args.handle or prof.get("handle") or first_word(name))
     prof["email"] = args.email or prof.get("email") or global_git("user.email")
     if args.agent:
@@ -2069,20 +2104,22 @@ def cmd_setup(args) -> int:
         (vault / "seed" / ".gitkeep").touch()
         git(home, "init", "--quiet")
         git(home, "add", "-A")
-        ident = ["-c", f"user.name={name}", "-c", f"user.email={prof['email'] or 'pairdeck@localhost'}"]
-        git(home, *ident, "commit", "--quiet", "-m", "PairDeck data home", check=False)
+        ident = ["-c", f"user.name={name}", "-c", f"user.email={prof['email'] or CLI + '@localhost'}"]
+        git(home, *ident, "commit", "--quiet", "-m", f"{TOOL} data home", check=False)
     print(f"profile: {prof_path}\n  {name} (the review page says \"{prof['handle']}\"), agent {prof['agent']}\n"
           f"style vault: {vault}\nprojects: {home / 'projects'}\n"
-          f"Next: pairdeck seed <your past decks> (optional), then pairdeck new <slug> --title \"…\"")
+          f"Next: {CLI} seed <your past {UNIT}s> (optional), then {CLI} new <slug> --title \"…\"")
     return 0
 
 
 def cmd_paths(args) -> int:
-    rows = [("code", f"{APP} (pairdeck {VERSION})"), ("data home", str(DATA)),
-            ("profile", f"{PROFILE_PATH}" + ("" if PROFILE_PATH.exists() else " (none yet: `pairdeck setup`)")),
+    rows = [("code", f"{POSTER_APP if POSTER else APP} ({CLI} {VERSION})"), ("data home", str(DATA)),
+            ("profile", f"{PROFILE_PATH}" + ("" if PROFILE_PATH.exists() else f" (none yet: `{CLI} setup`)")),
             ("style guide", str(STYLE_MD)), ("evidence", str(EVIDENCE)), ("seeds", str(SEEDS)),
             ("loop preferences", str(VAULT / "preferences.md")), ("engine", str(ENGINE)),
             ("projects", f"{PROJECTS}" + (": " + ", ".join(project_slugs()) if project_slugs() else ""))]
+    if POSTER:
+        rows.insert(4, ("visual look", f"{DECK_STYLE_MD} (PairDeck's style guide)"))
     if args.json:
         print(json.dumps(dict(rows), indent=1))
     else:
@@ -2093,10 +2130,12 @@ def cmd_paths(args) -> int:
 
 def cmd_status(args) -> int:
     if not args.slug:
-        print(f"data home: {DATA}" + ("" if PROFILE_PATH.exists() else " (no profile yet: `pairdeck setup`)"))
+        print(f"data home: {DATA}" + ("" if PROFILE_PATH.exists() else f" (no profile yet: `{CLI} setup`)"))
         if PROFILE:
             print(f"  author: {PROFILE.get('name')} ({HANDLE}) · agent {AGENT}")
         print(f"  style guide: {style_summary()}")
+        if POSTER:
+            print(f"  visual look: {DECK_STYLE_MD}" + ("" if DECK_STYLE_MD.exists() else " (none yet)"))
         print(f"  seeds: {len(seed_ids())} · style evidence waiting: {len(pending_events(None, every=True))}")
         for slug in project_slugs():
             p = Project(slug)
@@ -2104,23 +2143,23 @@ def cmd_status(args) -> int:
             print(f"  {slug}: {p.deck}" + (" (missing)" if not p.deck.exists() else "")
                   + (" · watching" if w else "") + (f" · review {s['url']}" if s else ""))
         if not project_slugs():
-            print("  no decks yet: pairdeck new <slug> --title \"…\"")
+            print(f"  no {UNIT}s yet: {CLI} new <slug> --title \"…\"")
         return 0
     p = Project(args.slug)
     st = load_state(p)
     meta = snapshot_meta(p, st.get("base"))
     print(f"{p.slug}: {p.title}")
-    print(f"  deck: {p.deck}" + ("" if p.deck.exists() else " (MISSING)"))
+    print(f"  {UNIT}: {p.deck}" + ("" if p.deck.exists() else " (MISSING)"))
     if meta:
         changed = sorted(r for r, t in p.contents().items() if meta["files"].get(r) != sha1(t))
         changed += sorted(r for r in meta["files"] if not (p.deck_dir / r).exists())
         print(f"  snapshot: {meta['id']} ({meta['by']}, {meta['time']})" +
-              (f" · changed since: {', '.join(changed)}" if changed else " · the deck matches it"))
+              (f" · changed since: {', '.join(changed)}" if changed else f" · the {UNIT} matches it"))
     else:
-        print(f"  snapshot: none yet (`pairdeck snapshot {p.slug}` after building)")
+        print(f"  snapshot: none yet (`{CLI} snapshot {p.slug}` after building)")
     w, s = lock_owner(p), p.server()
     print("  watcher: " + (f"running, pid {w['pid']} since {w['started']}" if w else "not running"))
-    print("  review page: " + (f"{s['url']} (pid {s['pid']})" if s else f"not running (`pairdeck review {p.slug}`)"))
+    print("  review page: " + (f"{s['url']} (pid {s['pid']})" if s else f"not running (`{CLI} review {p.slug}`)"))
     counts: dict = {}
     for c in comment_threads(p, set(st.get("sent", []))):
         counts[c["status"]] = counts.get(c["status"], 0) + 1
@@ -2130,11 +2169,367 @@ def cmd_status(args) -> int:
     return 0
 
 
+# ------------------------------------------------------------------------------------ posters (PairPoster)
+
+POSTER_DOC = """pairposter (PairPoster): a conference poster as one HTML page at its printed size, a comment loop on it, and a
+poster-style guide that learns.
+
+The agent builds the poster with the bundled engine (`pairposter new`), checks it (`pairposter qa`: overflow, type size at
+print scale, words per block, phrases instead of sentences, image resolution, plus a full view and close-ups) and records
+its version (`pairposter snapshot`). The author opens it in the local review page (`pairposter review`), zooms in, drags a
+box and types a comment. `pairposter watch` waits for comments and the author's own edits and exits with one batch, which
+wakes the agent: it fixes the poster, answers each comment (`pairposter resolve`), learns (`pairposter learn`) and watches
+again. `pairposter print` writes the PDF at the poster's size and the PNG a venue's site asks for.
+
+Data (profile, poster-style vault, projects) lives in $PAIRPOSTER_HOME, else ~/.pairposter (`pairposter setup`). The visual
+look (palette, type) is shared with PairDeck's style guide. Standard library only (Python 3.9+), plus git and Chrome.
+"""
+
+# Blocks a comment box is anchored to (the smallest one under its centre), so it stays on the same content as the layout moves.
+POSTER_ANCHORS = (".pp-fig, .pp-card, .pp-eq, .pp-stat, .pp-step, .pp-take, .pp-list, .pp-lead, .pp-h, .pp-qr, .pp-chips, "
+                  ".pp-block, .pp-head, .pp-foot")
+POSTER_DECK_DEFAULTS = {"TODO: the question this answers, in plain words": "TODO: authors",
+                        "TODO: authors · occasion and year": "TODO: venue and year"}
+
+
+def parse_size(text: str) -> tuple[float, float]:
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|in)?\s*", text or "")
+    if not m:
+        raise PdError(f"--size takes WIDTHxHEIGHT in mm (or cm, in), e.g. 1400x900; got '{text}'")
+    k = {"cm": 10.0, "in": 25.4}.get(m.group(3) or "mm", 1.0)
+    w, h = float(m.group(1)) * k, float(m.group(2)) * k
+    if not (100 <= w <= 3000 and 100 <= h <= 3000):
+        raise PdError(f"a poster between 10 cm and 3 m a side, please (got {w:g} x {h:g} mm)")
+    return round(w, 1), round(h, 1)
+
+
+def poster_subs(args) -> dict:
+    w, h = parse_size(args.size)
+    subs = {"W": f"{w:g}", "H": f"{h:g}", "ICONS": read_text(ENGINE / "icons.svg").strip()}
+    for key, val in (("SUBTITLE", args.subtitle), ("META", args.meta)):
+        if val in POSTER_DECK_DEFAULTS:
+            subs[key] = POSTER_DECK_DEFAULTS[val]
+    return subs
+
+
+def poster_cfg(page: str) -> dict:
+    m = re.search(r"""<meta\s+name="pairposter"\s+content=(?:'([^']*)'|"([^"]*)")""", page)
+    if not m:
+        return {}
+    try:
+        return json.loads(htmlmod.unescape(m.group(1) or m.group(2) or "{}"))
+    except ValueError:
+        return {}
+
+
+def serve_dir(root: str):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=root))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/"
+
+
+# Injected by `pairposter qa` into a temporary copy: measures the laid-out poster and writes a JSON report into the DOM.
+POSTER_MEASURE = r"""<script>
+(function () {
+  function report(rep) {
+    var s = document.createElement("script"); s.type = "application/json"; s.id = "pp-report";
+    s.textContent = JSON.stringify(rep); document.body.appendChild(s);
+  }
+  function run() {
+    var P = window.Poster || {}, cfg = P.cfg || {}, poster = document.querySelector(".pp-poster");
+    var rep = { errors: [], warnings: [], blocks: [], small: [], long: [], images: [], empty: [], words: 0, min_pt: null,
+                todo: 0, floor_pt: +cfg.min_pt || 24, fine_pt: +cfg.fine_pt || 18, budget: +cfg.words || 300,
+                block_budget: +cfg.block_words || 45 };
+    if (!poster) { rep.errors.push("no .pp-poster element"); report(rep); return; }
+    var sc = P.scale || 1, MM = 96 / 25.4;
+    function mm(px) { return Math.round(px / MM); }
+    function shown(el) {
+      for (var e = el; e && e !== poster; e = e.parentElement) {
+        var cs = getComputedStyle(e);
+        if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) < 0.05) return false;
+      }
+      return true;
+    }
+    function label(el) {
+      var b = el.closest("[data-label]"), lab = b && b !== poster ? b.getAttribute("data-label") : "";
+      var cls = typeof el.className === "string" && el.className ? "." + el.className.split(/\s+/)[0] : el.tagName.toLowerCase();
+      var t = (el.textContent || "").replace(/\s+/g, " ").trim();
+      return (lab ? "[" + lab + "] " : "") + cls + (t ? ' "' + (t.length > 60 ? t.slice(0, 58) + "…" : t) + '"' : "");
+    }
+    function words(el) {
+      var t = "", w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), n;
+      while ((n = w.nextNode())) {
+        var pe = n.parentElement;
+        if (!pe || pe.closest("mjx-container, svg, .pp-fine, .pp-qr, .pp-head, [data-nowords], style, script")) continue;
+        if (!shown(pe)) continue;
+        t += " " + n.nodeValue;
+      }
+      return (t.match(/[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ'’-]*/g) || []).length;
+    }
+    // 1. nothing may spill out of its box
+    poster.querySelectorAll(".pp-stage, .pp-body, .pp-col, .pp-block, .pp-card, .pp-eq, .pp-take, .pp-head, .pp-foot, " +
+                            ".pp-chip, .pp-step, .pp-stat, .pp-fig").forEach(function (el) {
+      if (!shown(el)) return;
+      var dy = el.scrollHeight - el.clientHeight, dx = el.scrollWidth - el.clientWidth;
+      if (dy > 3 || dx > 3)
+        rep.errors.push("overflow: " + label(el) + " is " + (dy > 3 ? mm(dy) + " mm too tall" : "") +
+                        (dy > 3 && dx > 3 ? " and " : "") + (dx > 3 ? mm(dx) + " mm too wide" : ""));
+    });
+    // 2. type size at print scale (SVG text: its font size times the drawing's scale)
+    var tw = document.createTreeWalker(poster, NodeFilter.SHOW_TEXT), n, seen = [], minPt = 1e9;
+    while ((n = tw.nextNode())) {
+      if (!n.nodeValue.trim()) continue;
+      var el = n.parentElement;
+      if (!el || el.closest("mjx-container, style, script, .pp-ui") || !shown(el)) continue;
+      if (/TODO/.test(n.nodeValue)) rep.todo++;
+      if (el.closest("sup, sub, tspan[baseline-shift]")) continue;  // indices ride on larger type
+      var fs = parseFloat(getComputedStyle(el).fontSize), svg = el.closest("svg"), pt;
+      if (svg) {
+        var vb = svg.viewBox && svg.viewBox.baseVal, k = 1;
+        if (vb && vb.width) k = (svg.getBoundingClientRect().width / sc) / vb.width;
+        pt = fs * k * 0.75;
+      } else pt = fs * 0.75;
+      pt = Math.round(pt * 10) / 10;
+      if (pt < minPt) minPt = pt;
+      var fine = !!el.closest(".pp-fine, .pp-cap, .pp-affil, .pp-qr, [data-fine]");
+      var floor = fine ? rep.fine_pt : rep.floor_pt;
+      if (pt < floor - 0.05 && seen.indexOf(el) < 0) { seen.push(el); rep.small.push({ pt: pt, floor: floor, what: label(el) }); }
+    }
+    rep.min_pt = minPt === 1e9 ? null : minPt;
+    // 3. words: per block and in all (the title band, fine print, QR labels, formulas and drawings do not count)
+    var tops = Array.prototype.filter.call(poster.querySelectorAll(".pp-block, .pp-take"), function (b) {
+      return !b.parentElement.closest(".pp-block, .pp-take") && shown(b);
+    });
+    tops.forEach(function (b) {
+      var w = words(b), holder = b.closest("[data-label]"), lab = holder && holder !== poster ? holder.getAttribute("data-label") : label(b);
+      rep.blocks.push({ label: lab, words: w });
+      if (w > rep.block_budget) rep.warnings.push("words: [" + lab + "] has " + w + " words (budget " + rep.block_budget + ")");
+    });
+    rep.words = words(poster);
+    if (rep.words > rep.budget) rep.warnings.push("words: " + rep.words + " on the poster (budget " + rep.budget + ")");
+    // 4. phrases, not sentences
+    poster.querySelectorAll("p, li, .pp-t, .pp-lead, figcaption, td").forEach(function (el) {
+      if (el.closest(".pp-head, .pp-fine, .pp-qr, [data-nowords]") || !shown(el)) return;
+      if (el.querySelector("p, li, .pp-t, .pp-lead")) return;
+      var w = words(el), txt = el.textContent.replace(/\s+/g, " ").trim();
+      var sentence = /[.!?]["”)]?$/.test(txt) && w >= 7;
+      if (w > 12 || sentence) rep.long.push({ words: w, sentence: sentence, what: label(el) });
+    });
+    // 5. images at print resolution
+    poster.querySelectorAll("img").forEach(function (img) {
+      if (!shown(img)) return;
+      var src = img.getAttribute("src") || "";
+      if (!img.complete || !img.naturalWidth) { rep.errors.push("image not loaded: " + src); return; }
+      if (/\.svg(\?|#|$)/i.test(src)) return;
+      var wmm = img.getBoundingClientRect().width / sc / MM, dpi = Math.round(img.naturalWidth / (wmm / 25.4));
+      rep.images.push({ src: src, width_mm: Math.round(wmm), dpi: dpi });
+      if (dpi < 150) rep.warnings.push("image: " + src + " prints at " + dpi + " dpi (" + Math.round(wmm) + " mm wide; want 150 or more)");
+    });
+    // 6. empty space a block or a column leaves at its bottom
+    poster.querySelectorAll(".pp-block, .pp-col").forEach(function (b) {
+      if (!shown(b)) return;
+      var br = b.getBoundingClientRect(), bottom = br.top;
+      Array.prototype.forEach.call(b.children, function (k) {
+        var r = k.getBoundingClientRect();
+        if (r.height && shown(k)) bottom = Math.max(bottom, r.bottom);
+      });
+      var pad = parseFloat(getComputedStyle(b).paddingBottom) * sc, gap = (br.bottom - pad - bottom) / sc / MM;
+      if (gap > 40) rep.empty.push({ what: label(b), mm: Math.round(gap) });
+    });
+    report(rep);
+  }
+  // This script sits at the end of <body>; the engine (deferred) and MathJax start after it, so wait for the page's load,
+  // then for the engine's ready (fonts and typeset formulas).
+  window.addEventListener("load", function () {
+    var ready = window.Poster && window.Poster.ready ? window.Poster.ready : Promise.resolve();
+    ready.then(function () { setTimeout(run, 120); });
+  });
+})();
+</script>"""
+
+
+def pdf_pages(path: Path) -> list[tuple[float, float]]:
+    data = path.read_bytes()
+    boxes = re.findall(rb"/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]", data)
+    n = len(re.findall(rb"/Type\s*/Page(?![a-zA-Z])", data))
+    out = [(float(c) - float(a), float(d) - float(b)) for a, b, c, d in boxes]
+    return out[:n] if n else out
+
+
+def poster_target(arg: str):
+    deck_path, p = resolve_deck(arg)
+    page = read_text(deck_path)
+    cfg = poster_cfg(page)
+    W, H = float(cfg.get("width_mm") or 1189), float(cfg.get("height_mm") or 841)
+    engine_dir, root = find_engine(str(deck_path), page)
+    return deck_path, p, page, cfg, W, H, engine_dir, root
+
+
+def poster_qa(args) -> int:
+    deck_path, p, page, cfg, W, H, engine_dir, root = poster_target(args.deck)
+    if args.root:
+        root = os.path.abspath(os.path.expanduser(args.root))
+    root = root or str(deck_path.parent)
+    errors = []
+    if engine_dir is None:
+        errors.append(f"engine not found: the {ENGINE_CSS} link does not resolve on disk (use --root or fix the href)")
+    if not cfg:
+        errors.append("no <meta name=\"pairposter\" content='{\"width_mm\": …, \"height_mm\": …}'>: the page size is unknown")
+    if not re.search(r'class="[^"]*\bpp-poster\b', page):
+        errors.append("no element with class pp-poster")
+    print(f"Poster: {deck_path}")
+    print(f"Size: {W:g} x {H:g} mm ({W / 10:g} x {H / 10:g} cm) · engine: {engine_dir or 'NOT FOUND'}")
+    if errors or args.no_shots:
+        for e in errors:
+            print(f"  ERROR   {e}")
+        if not errors:
+            print("  lint: clean (measured checks need the browser: run without --no-shots)")
+        return 1 if errors else 0
+    if args.out:
+        out = os.path.abspath(os.path.expanduser(args.out))
+    elif p:
+        out = str(p.dir / "qa")
+    else:
+        out = os.path.join(tempfile.gettempdir(), f"{CLI}-qa", deck_path.stem)
+    os.makedirs(out, exist_ok=True)
+    for old in glob.glob(os.path.join(out, "*.png")):
+        os.remove(old)
+    tmp = deck_path.parent / f".qa-{deck_path.stem}-measure.html"
+    write_text(tmp, page.replace("</body>", POSTER_MEASURE + "</body>", 1))
+    chrome = find_chrome()
+    srv, base = serve_dir(root)
+    rel = lambda f: base + urllib.parse.quote(os.path.relpath(str(f), root).replace(os.sep, "/"))  # noqa: E731
+    common = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1"]
+    cols, rows = (int(x) for x in re.fullmatch(r"(\d)x(\d)", getattr(args, "grid", None) or "3x2").groups())
+    rep = None
+    try:
+        r = run_chrome(common + ["--virtual-time-budget=20000", "--window-size=1600,1000", "--dump-dom", rel(tmp)],
+                       capture_output=True, text=True, timeout=300)
+        m = re.search(r'<script type="application/json" id="pp-report">(.*?)</script>', r.stdout, re.S)
+        rep = json.loads(m.group(1)) if m else None
+        fw = 2800
+        jobs = [(os.path.join(out, "poster.png"), rel(deck_path) + "?export=1", fw, round(fw * H / W))]
+        tw = 1800
+        th = round(tw * (H / rows) / (W / cols))
+        for j in range(rows):
+            for i in range(cols):
+                view = f"{i / cols:.4f},{j / rows:.4f},{1 / cols:.4f},{1 / rows:.4f}"
+                jobs.append((os.path.join(out, f"close-r{j + 1}c{i + 1}.png"), rel(deck_path) + "?view=" + view, tw, th))
+
+        def shoot(job):
+            png, url, w, h = job
+            run_chrome(common + ["--virtual-time-budget=20000", f"--window-size={w},{h}", f"--screenshot={png}", url],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+            return png if os.path.exists(png) else None
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            pngs = [x for x in pool.map(shoot, jobs) if x]
+    finally:
+        srv.shutdown()
+        if tmp.exists():
+            tmp.unlink()
+    if rep is None:
+        print("  ERROR   the in-browser check did not report (did the page load? does poster.js run?)")
+        return 1
+    print(f"Type: smallest {rep['min_pt']} pt · floor {rep['floor_pt']:g} pt (fine print {rep['fine_pt']:g} pt)")
+    print(f"Words: {rep['words']} on the poster (budget {rep['budget']:g}) · per block: "
+          + " · ".join(f"{b['label']} {b['words']}" for b in rep["blocks"]))
+    for e in rep["errors"]:
+        print(f"  ERROR   {e}")
+    if rep["todo"]:
+        print(f"  ERROR   {rep['todo']} TODO left on the poster")
+    for s in rep["small"][:25]:
+        print(f"  ERROR   type {s['pt']:g} pt < {s['floor']:g}: {s['what']}")
+    if len(rep["small"]) > 25:
+        print(f"  ERROR   … and {len(rep['small']) - 25} more text runs below the floor")
+    for w in rep["warnings"]:
+        print(f"  warning {w}")
+    for x in rep["long"][:25]:
+        print(f"  warning {'a sentence' if x['sentence'] else 'long'} ({x['words']} words): {x['what']}: make it a phrase")
+    for x in rep["empty"]:
+        print(f"  note    {x['mm']} mm empty at the bottom of {x['what']}")
+    for im in rep["images"]:
+        print(f"  image   {im['src']}: {im['width_mm']} mm wide, {im['dpi']} dpi")
+    print(f"Screenshots ({len(pngs)}): {out}/poster.png (the whole poster) and close-r*c*.png "
+          f"({cols} x {rows} close-ups, each about {W / cols / 10:.0f} x {H / rows / 10:.0f} cm)")
+    print("Look at the whole poster first (does one picture carry it? where does the eye land?), then at every close-up.")
+    bad = bool(rep["errors"] or rep["small"] or rep["todo"])
+    return 1 if bad else 0
+
+
+def cmd_print(args) -> int:
+    deck_path, p, page, cfg, W, H, engine_dir, root = poster_target(args.poster)
+    root = root or str(deck_path.parent)
+    out = Path(args.out).expanduser().absolute() if args.out else deck_path.parent / "print"
+    out.mkdir(parents=True, exist_ok=True)
+    stem = args.name or (p.slug if p else deck_path.stem)
+    chrome = find_chrome()
+    srv, base = serve_dir(root)
+    url = base + urllib.parse.quote(os.path.relpath(str(deck_path), root).replace(os.sep, "/"))
+    status = 0
+    try:
+        if not args.png_only:
+            pdf = out / f"{stem}.pdf"
+            if pdf.exists():
+                pdf.unlink()
+            run_chrome([chrome, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", "--virtual-time-budget=20000",
+                        f"--print-to-pdf={pdf}", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+            if not pdf.exists():
+                print("  ERROR   Chrome wrote no PDF")
+                status = 1
+            else:
+                pages = pdf_pages(pdf)
+                dims = ", ".join(f"{w / 72 * 25.4:.0f} x {h / 72 * 25.4:.0f} mm" for w, h in pages[:3])
+                print(f"PDF: {pdf} · {len(pages)} page(s) · {dims} · {pdf.stat().st_size / 1e6:.1f} MB")
+                if len(pages) != 1:
+                    print("  ERROR   the poster printed on more than one page: something overflows the page")
+                    status = 1
+                elif abs(pages[0][0] / 72 * 25.4 - W) > 1.5 or abs(pages[0][1] / 72 * 25.4 - H) > 1.5:
+                    print(f"  ERROR   the page is not {W:g} x {H:g} mm")
+                    status = 1
+        if not args.pdf_only:
+            pw = args.png_width
+            ph = round(pw * H / W)
+            if args.png_max_height and ph > args.png_max_height:
+                ph = args.png_max_height
+                pw = round(ph * W / H)
+            png = out / f"{stem}_{pw}x{ph}.png"
+            if png.exists():
+                png.unlink()
+            run_chrome([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1",
+                        "--virtual-time-budget=20000", f"--window-size={pw},{ph}", f"--screenshot={png}", url + "?export=1"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+            if not png.exists():
+                print("  ERROR   Chrome wrote no PNG")
+                status = 1
+            else:
+                mb = png.stat().st_size / 1e6
+                print(f"PNG: {png} · {pw} x {ph} px · {mb:.1f} MB")
+                if args.png_max_mb and mb > args.png_max_mb:
+                    print(f"  warning the PNG is over {args.png_max_mb:g} MB: pass a smaller --png-width")
+    finally:
+        srv.shutdown()
+    return status
+
+
+def add_poster_commands(sub) -> None:
+    s = sub.add_parser("print", help="write the PDF at the poster's size, and the PNG a venue's site asks for")
+    s.add_argument("poster", help="a poster's slug, or a path to its HTML file")
+    s.add_argument("-o", "--out", help="output folder (default: print/ next to the poster)")
+    s.add_argument("--name", help="file name stem (default: the slug)")
+    s.add_argument("--png-width", type=int, default=4480, help="PNG width in pixels (default 4480)")
+    s.add_argument("--png-max-height", type=int, default=2880, help="cap on the PNG height (default 2880)")
+    s.add_argument("--png-max-mb", type=float, default=10, help="warn above this size (default 10 MB)")
+    s.add_argument("--pdf-only", action="store_true")
+    s.add_argument("--png-only", action="store_true")
+    s.set_defaults(fn=cmd_print)
+
+
 # ------------------------------------------------------------------------------------ main
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="pairdeck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"pairdeck {VERSION}")
+    ap = argparse.ArgumentParser(prog=CLI, description=POSTER_DOC if POSTER else __doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"{CLI} {VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("setup", help="create your profile and data home")
@@ -2143,22 +2538,22 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--email")
     s.add_argument("--agent", help="the agent's name on replies (default Claude)")
     s.add_argument("--language", help="language for the agent's chat reports (default: the author's)")
-    s.add_argument("--home", help="data home (default ~/.pairdeck; another folder gets a symlink there)")
+    s.add_argument("--home", help=f"data home (default ~/.{CLI}; another folder gets a symlink there)")
     s.add_argument("--no-git", action="store_true", help="do not make the data home a git repository")
     s.set_defaults(fn=cmd_setup)
 
-    s = sub.add_parser("paths", help="where the code, profile, style vault and decks are")
+    s = sub.add_parser("paths", help=f"where the code, profile, style vault and {UNIT}s are")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_paths)
 
-    s = sub.add_parser("status", help="the data home, or one deck: snapshot, watcher, review page, comments")
+    s = sub.add_parser("status", help=f"the data home, or one {UNIT}: snapshot, watcher, review page, comments")
     s.add_argument("slug", nargs="?")
     s.set_defaults(fn=cmd_status)
 
-    s = sub.add_parser("new", help="scaffold a deck with the engine and register it (or register an existing deck)")
+    s = sub.add_parser("new", help=f"scaffold a {UNIT} with the engine and register it (or register an existing {UNIT})")
     s.add_argument("slug")
     s.add_argument("--title", required=True, help="exact title; '|' forces a line break")
-    s.add_argument("--dir", help="the deck's folder (default ./SLUG)")
+    s.add_argument("--dir", help=f"the {UNIT}'s folder (default ./SLUG)")
     s.add_argument("--subtitle", default="TODO: the question this answers, in plain words")
     s.add_argument("--meta", default="TODO: authors · occasion and year")
     s.add_argument("--description", help="one-sentence page description (default: the subtitle)")
@@ -2169,11 +2564,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--engine-url", help="engine URL prefix ending in '/', e.g. /decks/_deck/ (default: copy to ./_deck/)")
     s.add_argument("--file", default="index.html")
     s.add_argument("--lang", default="en")
-    s.add_argument("--force", action="store_true", help="overwrite an existing deck file")
+    if POSTER:
+        s.add_argument("--size", default="1189x841",
+                       help="page size in mm, WIDTHxHEIGHT: the venue's maximum (default A0 landscape, 1189x841)")
+    s.add_argument("--force", action="store_true", help=f"overwrite an existing {UNIT} file")
     s.set_defaults(fn=cmd_new)
 
-    s = sub.add_parser("qa", help="lint the deck, check the layout, screenshot every slide fully built")
-    s.add_argument("deck", help="a deck's slug, or a path to its HTML file")
+    s = sub.add_parser("qa", help="check the poster (overflow, type size, words, images) and take a full view and close-ups"
+                       if POSTER else "lint the deck, check the layout, screenshot every slide fully built")
+    s.add_argument("deck", help=f"a {UNIT}'s slug, or a path to its HTML file")
     s.add_argument("--root", help="folder to serve (default: inferred from the engine link)")
     s.add_argument("--out", help="folder for screenshots (default: projects/SLUG/qa/ in the data home)")
     s.add_argument("--modes", default="light,dark,narrow")
@@ -2183,8 +2582,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--steps", action="store_true", help="also capture every build step of the chosen slides")
     s.add_argument("--no-layout", action="store_true", help="skip the in-browser layout check")
     s.add_argument("--no-shots", action="store_true", help="lint only")
+    if POSTER:
+        s.add_argument("--grid", default="3x2", help="close-ups: COLUMNSxROWS (default 3x2)")
     s.set_defaults(fn=cmd_qa)
 
+    if POSTER:
+        add_poster_commands(sub)
     s = sub.add_parser("bundle", help="inline the engine, icons, images and fonts into one HTML file")
     s.add_argument("deck")
     s.add_argument("-o", "--out", help="output file (default: dist/SLUG.html in the deck's folder)")
@@ -2200,7 +2603,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--icon", help="a small square image shown before the kicker")
     s.set_defaults(fn=cmd_card)
 
-    s = sub.add_parser("seed", help="read your past decks (.pptx, .pdf, .html) into the style vault")
+    s = sub.add_parser("seed", help=f"read your past {UNIT}s (.pptx, .pdf, .html) into the style vault")
     s.add_argument("paths", nargs="*")
     s.add_argument("--note", help="what these decks are, e.g. 'my last three conference talks'")
     s.add_argument("--max-pages", type=int, default=12, help="page images per file (sampled evenly)")
@@ -2208,14 +2611,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--forget", metavar="SEED_ID", help="remove a seed's folder and discard its events")
     s.set_defaults(fn=cmd_seed)
 
-    s = sub.add_parser("snapshot", help="record the agent's current version of the deck")
+    s = sub.add_parser("snapshot", help=f"record the agent's current version of the {UNIT}")
     s.add_argument("slug")
     s.add_argument("-m", "--message", help="what this version changed")
     s.set_defaults(fn=cmd_snapshot)
 
-    s = sub.add_parser("review", help="serve the deck on 127.0.0.1 with the comment overlay")
+    s = sub.add_parser("review", help=f"serve the {UNIT} on 127.0.0.1 with the comment overlay")
     s.add_argument("slug")
-    s.add_argument("--port", type=int, help="port (default: the deck's own, from project.json; 0 picks a free one)")
+    s.add_argument("--port", type=int, help=f"port (default: the {UNIT}'s own, from project.json; 0 picks a free one)")
     s.add_argument("--open", action="store_true", help="open the page in the default browser")
     s.set_defaults(fn=cmd_review)
 
@@ -2224,7 +2627,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--interval", type=float, default=1.5, help="seconds between checks")
     s.add_argument("--settle", type=float, default=8.0, help="quiet seconds before a batch is sent")
     s.add_argument("--once", action="store_true", help="check once; exit 1 if nothing is ready")
-    s.add_argument("--takeover", action="store_true", help="stop another watcher of this deck and watch here")
+    s.add_argument("--takeover", action="store_true", help=f"stop another watcher of this {UNIT} and watch here")
     s.add_argument("--max-hours", type=float, default=0)
     s.add_argument("--edits-are-author", action="store_true",
                    help="the deck changed after answered comments without a snapshot, and the author made those edits")
@@ -2240,7 +2643,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("learn", help="show style evidence waiting to be learned, or acknowledge or discard it")
     s.add_argument("slug", nargs="?")
-    s.add_argument("--all", action="store_true", help="every deck and every seed")
+    s.add_argument("--all", action="store_true", help=f"every {UNIT} and every seed")
     s.add_argument("--ack", nargs="*")
     s.add_argument("--discard", nargs="*", help="evidence that is not the author's: flag it and drop it")
     s.add_argument("--why", default="", help="with --discard: the reason, kept in the event")
@@ -2248,11 +2651,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-sync", action="store_true", help="do not look for new edits first")
     s.set_defaults(fn=cmd_learn)
 
+    if POSTER:  # decks only: a single-file bundle and a share card
+        sub._name_parser_map.pop("bundle", None)
+        sub._name_parser_map.pop("card", None)
+        sub._choices_actions[:] = [a for a in sub._choices_actions if a.dest not in ("bundle", "card")]
     args = ap.parse_args(argv)
     try:
         return args.fn(args)
     except PdError as exc:
-        print(f"pairdeck: {exc}")
+        print(f"{CLI}: {exc}")
         return exc.code
 
 

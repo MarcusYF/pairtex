@@ -3,6 +3,16 @@
 PairLab's releases. Each tool keeps its own detailed changelog: [PairDeck](pairdeck/CHANGELOG.md),
 [PairTeX](pairtex/CHANGELOG.md), [PairTalk](pairtalk/CHANGELOG.md).
 
+## Unreleased
+
+- **PairPoster 0.1.0** (new): conference posters as one HTML page at the venue's size, built picture-first (icon chains,
+  charts, big numbers, formula boxes) with word budgets per block; `qa` measures overflow, type size at print scale, words
+  and image resolution and shoots close-ups; `print` writes the one-page vector PDF and the venue's PNG; the comment loop,
+  snapshots and style learning are PairDeck's, run in a poster flavour, with a poster style vault in `~/.pairposter`.
+- **PairDeck 0.1.1**: the same program now also runs as PairPoster; the review overlay takes its wording and anchors from
+  the tool and records the labelled block a comment points at.
+- `./install.sh` installs all four tools.
+
 ## 0.1.0 (2026-11-12)
 
 PairTeX becomes one of three tools, and its repository becomes PairLab's.

@@ -4,6 +4,7 @@
 (function () {
   "use strict";
   var CFG = window.PAIRDECK || {};
+  var UNIT = CFG.unit === "poster" ? "poster" : "slide", TOOL = CFG.tool || "PairDeck", CLI = CFG.cli || "pairdeck";
   var API = "/__pairdeck/";
   var POLL_MS = 2500, MIN_DRAG = 8;
   var comments = [], sig = null, isOpen = false, marking = null, draft = null, shownId = null, tab = "slide", busy = false;
@@ -42,7 +43,7 @@
   }
   /* A box is also stored relative to the smallest block under its centre (a figure, the headline, the takeaway...), so it
      lands on the same marks when the layout reflows (a narrower window, a phone, the panel opening). */
-  var ANCHORS = ".dk-fig, .dk-h, .dk-take, .dk-note, .dk-list, .dk-ctl, .dk-cols, .dk-sub";
+  var ANCHORS = CFG.anchors || ".dk-fig, .dk-h, .dk-take, .dk-note, .dk-list, .dk-ctl, .dk-cols, .dk-sub";
   function anchorFor(slideEl, r) {
     if (!slideEl) return null;
     var cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, best = null;
@@ -84,7 +85,7 @@
   function textUnder(slideEl, r) {
     if (!slideEl) return "";
     var out = [], seen = {};
-    slideEl.querySelectorAll("text, h1, h2, h3, p, li, td, th, figcaption, button, label").forEach(function (el) {
+    slideEl.querySelectorAll("text, h1, h2, h3, p, li, td, th, figcaption, button, label, .pp-t, .pp-n, .pp-k, .pp-lead").forEach(function (el) {
       if (!shownInSlide(el, slideEl)) return;
       if (el.tagName.toLowerCase() !== "text" && el.closest("svg")) return;
       var b = el.getBoundingClientRect(), cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
@@ -96,13 +97,26 @@
     return s.length > 300 ? s.slice(0, 298) + "…" : s;
   }
 
+  /* The named part of the page under a box (the smallest element with a data-label, other than the slide itself):
+     on a poster, the block a comment is about. */
+  function blockUnder(slideEl, r) {
+    if (!slideEl) return "";
+    var cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, best = null;
+    slideEl.querySelectorAll("[data-label]").forEach(function (el) {
+      var b = el.getBoundingClientRect();
+      if (cx < b.left || cx > b.right || cy < b.top || cy > b.bottom || !b.width || !b.height) return;
+      if (!best || b.width * b.height < best.area) best = { area: b.width * b.height, label: el.getAttribute("data-label") };
+    });
+    return best ? best.label : "";
+  }
+
   // ------------------------------------------------------------------ building the UI
 
   function build() {
     fab = document.createElement("button");
     fab.type = "button";
     fab.className = "pd-fab";
-    fab.title = "Comment on this slide (c)";
+    fab.title = "Comment on this " + UNIT + " (c)";
     fab.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H10l-5 4v-4.3A2.5 2.5 0 0 1 4 13.5z"/><path d="M12 6.5v6M9 9.5h6"/></svg><span>Comment</span>';
     countBtn = document.createElement("button");
     countBtn.type = "button";
@@ -120,7 +134,7 @@
       '<div class="pd-row"><button type="button" class="pd-send">Send</button><button type="button" class="pd-cancel">Cancel</button>' +
       '<button type="button" class="pd-redraw">Redraw box</button></div><div class="pd-msg" aria-live="polite"></div></div>' +
       '<div class="pd-list"></div>' +
-      '<footer class="pd-foot">Your comments go to ' + esc(CFG.agent || "the agent") + ' through PairDeck. ' +
+      '<footer class="pd-foot">Your comments go to ' + esc(CFG.agent || "the agent") + ' through ' + esc(TOOL) + '. ' +
       'Press c to comment, Esc to cancel, Ctrl or ⌘ + Enter to send.</footer>';
     layer = document.createElement("div");
     layer.className = "pd-layer";
@@ -172,7 +186,7 @@
     if (!isOpen) setOpen(true);
     var ov = document.createElement("div");
     ov.className = "pd-mark";
-    ov.innerHTML = '<div class="pd-mhint">Drag a box over what you mean · click for the whole slide · Esc cancels</div>';
+    ov.innerHTML = '<div class="pd-mhint">Drag a box over what you mean · click for the whole ' + UNIT + ' · Esc cancels</div>';
     var R = deckEl().getBoundingClientRect();
     ov.style.left = R.left + "px"; ov.style.top = R.top + "px"; ov.style.width = R.width + "px"; ov.style.height = R.height + "px";
     document.body.append(ov);
@@ -192,16 +206,17 @@
     ov.addEventListener("pointerup", function (e) {
       if (!marking || !marking.down) return;
       marking.down = false;
-      var r = size(e), h = here(), F = frame(h.el), box = null, anchor = null, under = "";
+      var r = size(e), h = here(), F = frame(h.el), box = null, anchor = null, under = "", block = "";
       if (r.w >= MIN_DRAG && r.h >= MIN_DRAG) {
         var sr = { left: r.x, top: r.y, right: r.x + r.w, bottom: r.y + r.h };
         box = { x: (r.x - F.left) / F.width, y: (r.y - F.top) / F.height, w: r.w / F.width, h: r.h / F.height };
         anchor = anchorFor(h.el, sr);
         under = textUnder(h.el, sr);
+        block = blockUnder(h.el, sr);
       }
       var parent = marking.parent;
       endMark();
-      openDraft(h, box, under, parent, anchor);
+      openDraft(h, box, under, parent, anchor, block);
     });
     ov.addEventListener("click", function (e) { e.stopPropagation(); });
   }
@@ -222,13 +237,16 @@
 
   // ------------------------------------------------------------------ the draft
 
-  function openDraft(h, box, under, parent, anchor) {
+  function openDraft(h, box, under, parent, anchor, block) {
     var keep = draft ? area.value : "";
     draft = { slide: h.slide, slide_id: h.id, label: h.label, title: h.title, step: h.step, steps: h.steps, box: box,
-              anchor: anchor || null, under: under, parent: parent || null, viewport: [window.innerWidth, window.innerHeight] };
+              anchor: anchor || null, under: under, block: block || "", parent: parent || null,
+              viewport: [window.innerWidth, window.innerHeight] };
     compose.hidden = false;
-    where.innerHTML = (parent ? "Follow-up to <b>" + esc(parent) + "</b> · " : "New comment · ") + "slide " + h.slide +
-      (h.steps ? ", step " + h.step + " of " + h.steps : "") + " · " + (box ? "the box" : "the whole slide") +
+    var place = UNIT === "poster" ? (block ? "<b>" + esc(block) + "</b>" : "the poster")
+      : "slide " + h.slide + (h.steps ? ", step " + h.step + " of " + h.steps : "");
+    where.innerHTML = (parent ? "Follow-up to <b>" + esc(parent) + "</b> · " : "New comment · ") + place +
+      " · " + (box ? "the box" : "the whole " + UNIT) +
       (under ? '<span class="pd-under">' + esc(under) + "</span>" : "");
     area.value = keep;
     msg.textContent = "";
@@ -259,7 +277,7 @@
         shownId = rec.id;
         return poll();
       })
-      .catch(function (e) { msg.textContent = "Not sent: " + e.message + ". Is `pairdeck review` still running?"; })
+      .catch(function (e) { msg.textContent = "Not sent: " + e.message + ". Is `" + CLI + " review` still running?"; })
       .then(function () { busy = false; });
   }
 
@@ -277,7 +295,8 @@
       ? '<div class="pd-actions">' + (c.kept ? "" : '<button type="button" data-act="keep" title="Accept the change as made">Keep</button>') +
         '<button type="button" data-act="follow">Follow up</button></div>' : "";
     return '<article class="pd-item' + (c.id === shownId ? " is-shown" : "") + '" data-id="' + esc(c.id) + '">' +
-      '<div class="pd-meta"><b>' + esc(c.id) + "</b> · slide " + c.slide + (c.steps ? "." + c.step : "") +
+      '<div class="pd-meta"><b>' + esc(c.id) + "</b> · " + (UNIT === "poster" ? esc(c.block || "poster")
+        : "slide " + c.slide + (c.steps ? "." + c.step : "")) +
       (c.parent ? " · re " + esc(c.parent) : "") + " · " + esc(when(c.time)) + " " + statusChip(c) + "</div>" +
       '<div class="pd-text"><b>' + esc(c.author || CFG.author || "You") + ":</b> " + esc(c.text) + "</div>" + replies + acts +
       "</article>";
@@ -288,10 +307,11 @@
     var mine = comments.filter(function (c) { return c.slide === h.slide; });
     var rows = tab === "all" ? comments : mine;
     panel.querySelectorAll("[data-tab]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-tab") === tab)); });
-    $("[data-tab=slide]", panel).textContent = "This slide (" + mine.length + ")";
+    $("[data-tab=slide]", panel).textContent = "This " + UNIT + " (" + mine.length + ")";
+    $(".pd-tabs", panel).hidden = allSlides().length <= 1;  // one page (a poster): "this slide" and "all" are the same
     $("[data-tab=all]", panel).textContent = "All (" + comments.length + ")";
     list.innerHTML = rows.length ? rows.slice().reverse().map(itemHTML).join("")
-      : '<p class="pd-empty">' + (tab === "all" ? "No comments yet." : "No comments on this slide yet.") +
+      : '<p class="pd-empty">' + (tab === "all" ? "No comments yet." : "No comments on this " + UNIT + " yet.") +
         " Press <b>Comment</b>, drag a box over what you mean, and type.</p>";
     var open = comments.filter(function (c) { return c.status !== "answered" && c.status !== "kept"; }).length;
     countBtn.textContent = comments.length ? comments.length + (open ? " · " + open + " open" : "") : "0";
@@ -325,9 +345,8 @@
     if (draft && draft.box && draft.slide === h.slide) putBox(draft, "pending", "new");
   }
   function goTo(c) {
-    if (!window.Deck) return;
     var h = here();
-    if (h.slide !== c.slide || h.step !== (c.step || 0)) {
+    if (window.Deck && (h.slide !== c.slide || h.step !== (c.step || 0))) {
       window.Deck.go(c.slide - 1);
       for (var k = 0; k < (c.step || 0); k++) window.Deck.next();
     }
@@ -349,7 +368,7 @@
     goTo(c);
     if (act && act.getAttribute("data-act") === "follow") {
       var h = here();
-      openDraft(h, c.box, c.under || "", c.id, c.anchor);
+      openDraft(h, c.box, c.under || "", c.id, c.anchor, c.block);
       return;
     }
     setTimeout(render, 80);

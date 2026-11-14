@@ -1,9 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (unreleased)
+
+- **Runs PairPoster too.** `../pairposter/bin/pairposter` runs this program in its poster flavour (`PAIRLAB_FLAVOR=poster`):
+  its own data home, template, engine, `qa` and `print`; the review page, watch, resolve, snapshot, learn and seed are shared.
+  Deck behaviour is unchanged.
+- **Review overlay.** Its wording, anchors and tool name come from the page's configuration; a comment also records the
+  smallest labelled block under its box (`block`), and the comment list works without a slide engine.
 
 - **Review page.** Once the author presses **Keep** on an answer, that comment's box is no longer drawn on the slide; it
-  shows again only while the comment is selected in the list. (Fan, 2026-11-12.)
+  shows again only while the comment is selected in the list.
 
 ## 0.1.0 (2026-11-12)
 
