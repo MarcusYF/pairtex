@@ -46,7 +46,9 @@ No profile yet: ask the author's name and run `$PP setup --name "…" --agent <y
 
 1. **Read the source in full and write a fact sheet:** the claims and numbers the poster may show, each with its location in
    the paper. An existing poster draft (LaTeX, Beamer, PDF) is a source too: take its facts, logos, links and data (chart
-   values, confidence intervals), not its wording.
+   values, confidence intervals), not its wording. A paper figure made with matplotlib and saved as a vector PDF holds its
+   exact data: `python3 <PairPoster>/tools/figdata.py fig.pdf > fig.json` recovers the lines and error bands, so you can
+   redraw the chart in the poster's style instead of pasting a picture with small labels.
 2. **Find the story** (`references/poster.md`): the one-line takeaway, the question that hooks a passer-by, and four to six
    blocks in reading order. For every block, decide its **picture first**: a chart, a schematic, an icon chain, big numbers,
    a formula worth a glance. Words only label the pictures.
@@ -74,6 +76,10 @@ Start it when the author asks ("watch my poster", or yes to your offer):
    `run_in_background: true`). One watcher per poster; `--takeover` only when the author moves the loop to this session. An
    agent that cannot be woken by a background command polls `$PP watch <slug> --once` every 30 to 60 seconds.
 4. Tell the author in one line that you are watching, and where the review page is.
+
+**Changes asked for in chat** (not on the review page), while the loop runs: stop the background watcher first, make the
+change, `snapshot`, then watch again. A watcher that sees your edits before the snapshot records them as the author's; if it
+happens, `learn --discard <ids> --why "the agent's own edit"`. Until you have snapshotted, run `learn` with `--no-sync`.
 
 **Authorization.** Starting the loop at the author's request authorizes edits to this poster that answer its comments, for
 this session. It does not authorize printing services, uploads to a venue, or sending the poster anywhere.

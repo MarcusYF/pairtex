@@ -22,4 +22,7 @@ The first version, as PairLab's fourth tool.
   export and `qa` show the finished poster.
 - A block's parts keep their size (`.pp-block > *` does not shrink), so `qa` reports the block that overflows, not a
   squeezed part; `.pp-spread` spreads a tall block's spare height.
+- **`tools/figdata.py`**: recovers the data of a matplotlib vector PDF (lines, error bands, axis mapping from the tick
+  labels), so a paper's plot can be redrawn in the poster's style. Standard library only.
+- SVG text keeps its own `fill` (the engine's default ink applies only to text without one).
 - `tests/test_e2e.py`: 31 checks (the measured checks, screenshots and printing need Chrome).

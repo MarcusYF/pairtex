@@ -131,7 +131,7 @@ html.pp-export .pp-ui { display: none !important; }
 .pp-fig img, .pp-fig svg.pp-chart { display: block; max-width: 100%; height: auto; }
 .pp-cap { font-size: var(--fs-fine); color: var(--muted); text-align: center; line-height: 1.15; }
 svg.pp-chart { overflow: visible; font-family: var(--font); }
-svg.pp-chart text { fill: var(--ink); }
+svg.pp-chart text:not([fill]) { fill: var(--ink); }  /* a fill set on the text itself wins */
 
 /* chips and tags */
 .pp-chips { display: flex; flex-wrap: wrap; gap: 4mm; }

@@ -75,6 +75,10 @@ gaps under `\underbrace`.
 
 ## SVG charts
 
+A chart from the paper: if it was saved by matplotlib as a vector PDF, `tools/figdata.py fig.pdf` prints its lines (x, y),
+error bands (lo, hi) and colours as JSON, read from the PDF's drawing operations with the axis mapping from the tick labels
+(linear axes, one plot per file). Redraw from that, not from a screenshot.
+
 Use a `viewBox` in millimetres and the same width and height in CSS (`style="width:250mm;height:150mm"`), so a `font-size` of
 8.5 is 8.5 mm (24 pt): 7.1 is 20 pt, 8.5 is 24 pt, 10.6 is 30 pt. Give the svg `class="pp-chart"` and `data-fine` (chart
 labels may use the fine-print floor), a `role="img"` and an `aria-label` that states what it shows. Subscripts:

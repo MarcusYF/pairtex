@@ -171,6 +171,36 @@ def main() -> int:
     out = pp("status")
     ok("demo:" in out and "visual look:" in out, "status lists the poster and the visual-look guide")
 
+    print("figdata")
+    # a synthetic figure in matplotlib's PDF idiom: grid lines, tick marks, tick labels, a band and a line, a legend sample
+    ops = ["/DeviceRGB CS", "/DeviceRGB cs"]
+    X = lambda v: 50 + v * 40          # noqa: E731  (x = 0..4)
+    Y = lambda v: 40 + v * 100         # noqa: E731  (y = 0..1)
+    for v in range(5):
+        ops += [f"{X(v)} 40 m", f"{X(v)} 140 l", "S", f"{X(v)} 40 m", f"{X(v)} 35 l", "B",
+                f"BT /F1 10 Tf {X(v) - 3} 22 Td ({v}) Tj ET"]
+    for v in (0, 0.5, 1):
+        ops += [f"50 {Y(v)} m", f"210 {Y(v)} l", "S", f"50 {Y(v)} m", f"45 {Y(v)} l", "B",
+                f"BT /F1 10 Tf 25 {Y(v) - 3.6} Td ({v:g}) Tj ET"]
+    ys = [0.1, 0.4, 0.55, 0.62, 0.7]
+    ops += ["0.2 0.4 0.8 rg", f"{X(0)} {Y(ys[0] + .05)} m"]
+    ops += [f"{X(i)} {Y(y - .05)} l" for i, y in enumerate(ys)] + [f"{X(i)} {Y(y + .05)} l" for i, y in reversed(list(enumerate(ys)))]
+    ops += ["h", "f", "0.2 0.4 0.8 RG", f"{X(0)} {Y(ys[0])} m"] + [f"{X(i)} {Y(y)} l" for i, y in enumerate(ys[1:], 1)] + ["S"]
+    ops += ["q 1 0 0 1 170 120 cm", "0 0 m", "5 0 l", "10 0 l", "S", "BT /F1 9 Tf 14 0 Td (1) Tj ET", "Q"]
+    body = "\n".join(ops).encode()
+    pdf = TMP / "fig.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n1 0 obj << /Length " + str(len(body)).encode() + b" >>\nstream\n" + body
+                    + b"\nendstream\nendobj\n%%EOF\n")
+    fd = Path(__file__).resolve().parent.parent / "tools" / "figdata.py"
+    r = subprocess.run([sys.executable, str(fd), str(pdf)], capture_output=True, text=True, timeout=60)
+    data = json.loads(r.stdout) if r.returncode == 0 else {}
+    ser = data.get("series", [])
+    ok(len(ser) == 1, "figdata finds the one data line (not the grid, the ticks or the legend sample)")
+    ok(ser and max(abs(a - b) for a, b in zip(ser[0]["y"], ys)) < 1e-6 and ser[0]["x"] == [0, 1, 2, 3, 4],
+       "figdata recovers the line's values through the axis mapping")
+    ok(ser and ser[0]["lo"] and max(abs(a - (b - .05)) for a, b in zip(ser[0]["lo"], ys)) < 1e-6,
+       "figdata recovers the error band of the same colour")
+
     print(f"\nall {passed} checks passed")
     return 0
 
