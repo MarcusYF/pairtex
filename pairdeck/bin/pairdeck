@@ -2230,6 +2230,7 @@ def serve_dir(root: str):
 
 # Injected by `pairposter qa` into a temporary copy: measures the laid-out poster and writes a JSON report into the DOM.
 POSTER_MEASURE = r"""<script>
+window.PP_NO_BUILD = true;  // measure the finished poster: no on-screen builds
 (function () {
   function report(rep) {
     var s = document.createElement("script"); s.type = "application/json"; s.id = "pp-report";

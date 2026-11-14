@@ -87,6 +87,13 @@ Vector, from LaTeX: `\documentclass{standalone}\usepackage{qrcode}\begin{documen
 then `latex` and `dvisvgm --no-fonts --exact-bbox -o img/qr_paper.svg`. A code from an app (a WeChat card) stays a PNG of 300
 dpi or more. Check that each one decodes to its URL (in Chrome: `BarcodeDetector`) before printing.
 
+## Builds on screen
+
+`data-build="N"` on any part (an SVG `<g>` or path, a step, a formula box) makes it appear in order of N the first time the
+page opens on screen, for a laptop or tablet at the booth and for the review page; ▶ in the controls or the `p` key replays.
+Print, the PNG export and `qa` always show the finished poster, and readers who ask for reduced motion see it at once. Use it
+for the story parts only (the motivation picture, the model's sequence), at most about fifteen steps.
+
 ## Zoom and print
 
 On screen the page fits the window; + and − zoom, 0 fits, 1 shows print size, Ctrl or pinch + scroll zooms at the pointer;

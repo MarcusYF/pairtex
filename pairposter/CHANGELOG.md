@@ -18,4 +18,8 @@ The first version, as PairLab's fourth tool.
 - **A poster style vault** (`~/.pairposter`), with its own template; the visual look is read from PairDeck's guide.
 - **The skill** (`skill/SKILL.md`, `references/poster.md`, `components.md`, `qa.md`, `learning.md`, `seeding.md`): what a poster is
   for, picture-first grammar, word budgets, type sizes for print, turning a LaTeX or Beamer poster into one.
+- **Builds on screen**: `data-build="N"` parts appear in order the first time the page opens (▶ or `p` replays); print,
+  export and `qa` show the finished poster.
+- A block's parts keep their size (`.pp-block > *` does not shrink), so `qa` reports the block that overflows, not a
+  squeezed part; `.pp-spread` spreads a tall block's spare height.
 - `tests/test_e2e.py`: 31 checks (the measured checks, screenshots and printing need Chrome).

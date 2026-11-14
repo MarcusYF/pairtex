@@ -20,6 +20,9 @@ Before any markup, write down:
 3. **Four to six blocks in reading order**, usually: why it matters → the setting or model → the main result (theory or
    method) → the evidence → what it means. Number them; columns read top to bottom, left to right.
 4. **For every block, its picture**: what a reader sees first. Then the few words that label it.
+5. **Make the problem unmistakable.** Most visitors only want to know what problem the paper solves: tell it as a
+   picture (a cycle, a before → after, who acts and what follows), put the hook in the heading, and add one framed line
+   "Our problem: …" in plain words. Then the model as a sequence of who moves when.
 
 ## 3. Picture first
 

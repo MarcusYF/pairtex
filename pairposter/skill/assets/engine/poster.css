@@ -59,6 +59,8 @@ html.pp-export .pp-ui { display: none !important; }
 .pp-block { position: relative; background: var(--paper); border: var(--rule) solid var(--line); border-radius: var(--radius);
             padding: var(--inner); display: flex; flex-direction: column; gap: 7mm; min-height: 0; overflow: hidden; }
 .pp-block.pp-grow { flex: 1 1 auto; }
+/* a block's parts keep their size: content that does not fit shows up as the block's overflow, not as squeezed parts */
+.pp-block > * { flex-shrink: 0; }
 /* a block taller than its content: spread the spare height between its parts instead of leaving it at the bottom */
 .pp-block.pp-spread { justify-content: space-between; }
 .pp-block.pp-tint { background: var(--wash); border-color: transparent; }
@@ -149,6 +151,12 @@ svg.pp-chart text { fill: var(--ink); }
 
 .pp-fine { font-size: var(--fs-fine); color: var(--muted); }
 
+/* ---------------------------------------------------------------- builds: on screen only
+   Parts with data-build="N" appear in order of N the first time the page opens (poster.js); ▶ or the p key replays.
+   Print, export (PNG) and the checks always show the finished poster. */
+html.pp-building .pp-poster [data-build] { opacity: 0; transform: translateY(3mm); transition: opacity .5s ease, transform .5s ease; }
+html.pp-building .pp-poster [data-build].pp-on { opacity: 1; transform: none; }
+
 /* ---------------------------------------------------------------- on-screen controls (never printed) */
 .pp-ui { position: fixed; left: 14px; bottom: 14px; z-index: 50; display: flex; gap: 4px; align-items: center;
          font: 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #223; background: rgba(255,255,255,.94);
@@ -164,4 +172,5 @@ svg.pp-chart text { fill: var(--ink); }
   .pp-sizer { width: auto !important; height: auto !important; margin: 0 !important; }
   .pp-poster { position: relative; transform: none !important; box-shadow: none; }
   .pp-ui { display: none !important; }
+  .pp-poster [data-build] { opacity: 1 !important; transform: none !important; }
 }

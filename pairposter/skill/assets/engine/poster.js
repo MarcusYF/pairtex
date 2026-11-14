@@ -1,7 +1,8 @@
 /* PairPoster engine: sizes the page from <meta name="pairposter">, fits it to the window, zooms and pans, and prints it at
    its real size. URL options: ?export=1 fits the page exactly to the window with no controls (PNG export);
    ?view=x,y,w,h shows that part of the page (fractions) filling the window (QA close-ups).
-   Keys: + and - zoom, 0 or f fits, 1 shows print size (1 CSS mm per mm). Ctrl or pinch + scroll zooms at the pointer. */
+   Keys: + and - zoom, 0 or f fits, 1 shows print size (1 CSS mm per mm), p plays the builds. Ctrl or pinch + scroll
+   zooms at the pointer. */
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -65,6 +66,33 @@
     view.scrollTop = oy * s + sizer.offsetTop - cy;
     window.dispatchEvent(new Event("resize"));
   }
+  /* Builds: parts with data-build="N" appear in order of N, on screen only. */
+  var playing = null;
+  function play() {
+    var els = Array.prototype.slice.call(document.querySelectorAll(".pp-poster [data-build]"));
+    if (!els.length || exportMode || window.PP_NO_BUILD) return;
+    var groups = {};
+    els.forEach(function (e) { var k = +e.getAttribute("data-build") || 0; (groups[k] = groups[k] || []).push(e); e.classList.remove("pp-on"); });
+    var keys = Object.keys(groups).map(Number).sort(function (a, b) { return a - b; });
+    if (playing) playing.forEach(clearTimeout);
+    playing = [];
+    root.classList.add("pp-building");
+    keys.forEach(function (k, i) {
+      playing.push(setTimeout(function () { groups[k].forEach(function (e) { e.classList.add("pp-on"); }); }, 300 + i * 380));
+    });
+    playing.push(setTimeout(function () {
+      root.classList.remove("pp-building");
+      els.forEach(function (e) { e.classList.remove("pp-on"); });
+      playing = null;
+    }, 300 + keys.length * 380 + 700));
+  }
+  function playOnce() {
+    var key = "pp-played:" + location.pathname, seen = false;
+    try { seen = sessionStorage.getItem(key) === "1"; sessionStorage.setItem(key, "1"); } catch (e) {}
+    var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!seen && !still) play();
+  }
+
   /* 1 CSS mm per mm: the size the page prints at (as near as the screen allows) */
   function printSize() { zoomTo(1); }
 
@@ -73,7 +101,8 @@
     ui.className = "pp-ui";
     ui.innerHTML = '<button type="button" data-z="out" title="Zoom out (-)">−</button><span class="pp-zoom"></span>' +
       '<button type="button" data-z="in" title="Zoom in (+)">+</button><button type="button" data-z="fit" title="Fit (0)">Fit</button>' +
-      '<button type="button" data-z="one" title="Print size (1)">1:1</button>';
+      '<button type="button" data-z="one" title="Print size (1)">1:1</button>' +
+      '<button type="button" data-z="play" title="Play the builds (p)">▶</button>';
     document.body.appendChild(ui);
     zoomLabel = ui.querySelector(".pp-zoom");
     ui.addEventListener("click", function (e) {
@@ -81,7 +110,8 @@
       if (!b) return;
       var z = b.getAttribute("data-z");
       if (z === "in") zoomTo(scale * 1.25); else if (z === "out") zoomTo(scale / 1.25);
-      else if (z === "fit") { fit(); window.dispatchEvent(new Event("resize")); } else printSize();
+      else if (z === "fit") { fit(); window.dispatchEvent(new Event("resize")); }
+      else if (z === "play") play(); else printSize();
     });
   }
 
@@ -126,6 +156,7 @@
         else if (e.key === "-" || e.key === "_") { e.preventDefault(); zoomTo(scale / 1.25); }
         else if (e.key === "0" || e.key === "f" || e.key === "F") { e.preventDefault(); fit(); window.dispatchEvent(new Event("resize")); }
         else if (e.key === "1") { e.preventDefault(); printSize(); }
+        else if (e.key === "p" || e.key === "P") { e.preventDefault(); play(); }
       });
     }
   }
@@ -151,9 +182,10 @@
     if (!poster) init();
     if (fitting) fit(); else apply(scale);
     root.setAttribute("data-pp-ready", "1");
+    playOnce();
   });
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
-  window.Poster = { cfg: cfg, width_mm: W, height_mm: H, fit: fit, zoom: zoomTo, ready: ready,
+  window.Poster = { cfg: cfg, width_mm: W, height_mm: H, fit: fit, zoom: zoomTo, ready: ready, play: play,
                     get scale() { return scale; } };
 })();
